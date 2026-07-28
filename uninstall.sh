@@ -29,8 +29,10 @@ rm -f /tmp/roam-events.pid
 
 cru d "$CRU_ID" 2>/dev/null
 [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
+[ -f /jffs/configs/profile.add ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" /jffs/configs/profile.add
 rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roamctl" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
 rm -rf /tmp/roam-detect
 
 logger -t roam-detect "uninstalled" 2>/dev/null
 echo "flowcache-doctor uninstalled. (services-start kept, minus our lines.)"
+echo "(the 'roamctl' alias stays live in THIS shell until you log out)"

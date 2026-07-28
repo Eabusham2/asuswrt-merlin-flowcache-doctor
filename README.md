@@ -419,6 +419,11 @@ cru a roam-detect-wd "* * * * * /jffs/scripts/roamctl watchdog"
 /jffs/scripts/roamctl status     # daemon pid + policy
 cru l | grep roam-detect         # watchdog registered
 /jffs/scripts/roamctl log        # "starting (pid ...)" line
+
+# 7. (Optional) Call it by bare name — takes effect at your next login.
+#    profile.add is sourced by /etc/profile; the full path always works too.
+mkdir -p /jffs/configs
+echo "alias roamctl='/jffs/scripts/roamctl'   # flowcache-doctor" >> /jffs/configs/profile.add
 ```
 
 Complete inventory of what exists after install — and all of it is removed
@@ -430,6 +435,7 @@ by any of the uninstall paths:
 | `/jffs/scripts/roamctl` | lifecycle wrapper (start/stop/status/log/policy/uninstall) |
 | `/jffs/scripts/roam-detect.policy` | persistent on/off switch (only if you used `policy`) |
 | two lines in `/jffs/scripts/services-start` | boot start + watchdog registration |
+| one line in `/jffs/configs/profile.add` | `alias roamctl=...` so it's callable by bare name at your next login |
 | cron entry `roam-detect-wd` | watchdog, every 60 s (RAM, re-added at boot) |
 | `/jffs/scripts/roam-events.sh` | wlceventd event listener (default-on when available; `EVENT_HEAL=0` disables) |
 | `/jffs/scripts/roam-lib.sh` | shared helpers (the `BSSLIST=auto` resolver), sourced by both daemons + `roamctl` |
@@ -470,7 +476,10 @@ installer never touches it), and all uninstall paths remove it:
 ```sh
 # /jffs/scripts/roam-detect.conf — all optional
 BSSLIST="auto"               # auto-detect SSID-carrying interfaces (default);
-                             #   or pin an explicit list: "wl0.1 wl1.1 wl2.1"
+                             #   or pin an explicit list. Interface names vary
+                             #   by model: "wl0.1 wl1.1 wl2.1" on BE-class,
+                             #   "eth6 eth7" on some AX-class — check yours with
+                             #   wl -i <member> ssid
 INTERVAL=2                   # seconds between detection passes
 COOLDOWN=60                  # min seconds between flushes per client (same radio)
 MIN_GAP=8                    # hard floor between flushes per client (any radio)
@@ -481,11 +490,15 @@ EVENT_HEAL=1                 # 0 = disable the wlceventd event listener (poller 
 ```
 
 `BSSLIST="auto"` (the default since v0.3.0) resolves the watched
-interfaces at daemon start: enumerate `br0` members, ask each its SSID
-(AiMesh-internal interfaces exclude themselves — primaries and node
-backhaul VAPs refuse the query, onboarding/backhaul SSIDs are filtered),
-keep every SSID spanning ≥2 interfaces (single-band networks can't
-band-roam). The cron watchdog re-resolves every 60 s and — after a
+interfaces at daemon start: enumerate `br0` members (minus WDS backhaul
+links), ask each its SSID — the *probe* decides what's a radio, never the
+name, because naming isn't portable across models (BE-class exposes
+radios as `wl0.1`, several AX-class models as `eth6`; since v0.3.2 both
+are handled). AiMesh-internal interfaces largely exclude themselves —
+primaries and node backhaul VAPs refuse the query, onboarding/backhaul
+SSIDs are filtered — and every SSID spanning ≥2 interfaces is kept
+(single-band networks can't band-roam). The cron watchdog re-resolves
+every 60 s and — after a
 two-reading debounce that rides out `restart_wireless` flapping —
 restarts the daemons when your network layout actually changed, so
 adding or removing a Wi-Fi network is picked up within ~2 minutes with

@@ -127,6 +127,17 @@ editing anything.
 ## Testing
 
 - Syntax: `for f in setup.sh install.sh uninstall.sh scripts/*; do sh -n "$f"; done`
+- **Resolver fixtures: `sh tests/resolver-fixtures.sh`** — run this after ANY
+  change to `resolve_bsslist()`. It replays real captured hardware layouts
+  (the maintainer's live BE92U router, a tester's BE92U node, AX3000 node,
+  AX88U Pro, AX88U)
+  against a stubbed `br0` + stubbed `wl`, and pins the grouping rules
+  (≥2-interface, 32-hex, wds exclusion). It is the only automated regression
+  net in the repo; the BE-class cases exist specifically to prove that
+  fixing another model didn't change the validated ones. Add a fixture
+  whenever a tester posts a new `wl -i <member> ssid` probe — fixtures are
+  cheap and each one is hardware we can't otherwise test. Placeholder SSIDs
+  only; only the grouping is meaningful.
 - There is no CI and no router emulator: real validation happens on an
   actual Asuswrt-Merlin router over SSH. Deploy pattern that avoids both
   connection bursts and the self-kill trap:

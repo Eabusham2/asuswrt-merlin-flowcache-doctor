@@ -3,7 +3,7 @@
 # Provides systemd-like lifecycle on Asuswrt-Merlin: boot start, crash
 # watchdog (via cru/cron), manual stop that disarms the watchdog, and a
 # persistent on/off policy.
-VERSION=0.3.1
+VERSION=0.3.2
 DAEMON=/jffs/scripts/roam-detect.sh
 EVDAEMON=/jffs/scripts/roam-events.sh    # wlceventd event listener (default-on when the event log exists)
 CONF=/jffs/scripts/roam-detect.conf
@@ -73,7 +73,17 @@ case "$1" in
               ep=$(echo $(epids))
               if [ -n "$ep" ]; then echo "event listener: running (pid $ep)"; else echo "event listener: enabled but NOT running"; fi
             else
-              echo "event listener: off (EVENT_HEAL=1 in roam-detect.conf to enable)"
+              # events_enabled() is false for three different reasons; the old
+              # text always blamed EVENT_HEAL, which sent a tester off editing
+              # a conf setting that was never the cause. Name the real one.
+              EVENT_HEAL=1; [ -f "$CONF" ] && . "$CONF"
+              if [ "$EVENT_HEAL" = "0" ]; then
+                echo "event listener: off (EVENT_HEAL=0 in roam-detect.conf)"
+              elif [ ! -f /jffs/wifi_wlc.log ]; then
+                echo "event listener: standing down (no /jffs/wifi_wlc.log on this firmware — poller covers healing)"
+              else
+                echo "event listener: off ($EVDAEMON missing or not executable)"
+              fi
             fi ;;
   log)      grep -E "roam-(detect|events)" /tmp/syslog.log | tail -30 ;;   # both daemons' tags — the listener's direct heals log as roam-events
   policy)   case "$2" in
@@ -132,18 +142,36 @@ case "$1" in
             grep -q "roamctl boot" "$SS" 2>/dev/null && ok "boot hook in services-start" || bad "boot hook missing from services-start"
             grep -q "roam-detect-wd" "$SS" 2>/dev/null && ok "watchdog registration in services-start" || bad "watchdog registration missing from services-start"
             cru l 2>/dev/null | grep -q "roam-detect-wd" && ok "cron watchdog armed" || bad "cron watchdog not registered (cru l)"
+            # QoL only — never a FAIL: an install predating the alias is healthy.
+            grep -q "^alias roamctl=" /jffs/configs/profile.add 2>/dev/null \
+              && ok "roamctl alias in profile.add" \
+              || note "no roamctl alias in /jffs/configs/profile.add (cosmetic; re-run the installer to add it)"
             # NB: this busybox has no `command` builtin — probe with `which`
             which fcctl >/dev/null 2>&1 && ok "fcctl available" || bad "fcctl not found — healing impossible on this firmware"
             # --- config + radios ---
+            # Say something either way: silence here let a tester spend days
+            # editing a conf the daemons never read (it was at another path).
             if [ -f "$CONF" ]; then
               sh -n "$CONF" 2>/dev/null && ok "conf parses: $CONF" || bad "conf has syntax errors: $CONF"
+            else
+              ok "no conf file at $CONF — built-in defaults in use"
             fi
             BSSLIST="auto"; [ -f "$CONF" ] && . "$CONF"
+            confmode=$BSSLIST   # "auto" or the user's explicit list, pre-resolution
             if [ "$BSSLIST" = "auto" ]; then
               if [ -f /jffs/scripts/roam-lib.sh ]; then
                 . /jffs/scripts/roam-lib.sh
+                # Distinguish a real live resolution from effective_bsslist()'s
+                # fallbacks (last fingerprint, then the static BE-flavoured
+                # default) — reporting a fallback as "resolved" is what made
+                # the AX-class reports read like a resolver success.
+                live=$(resolve_bsslist)
                 BSSLIST=$(effective_bsslist auto)
-                ok "BSSLIST=auto resolved: ${BSSLIST:-<nothing>}"
+                if [ -n "$live" ]; then
+                  ok "BSSLIST=auto resolved: $BSSLIST"
+                else
+                  note "BSSLIST=auto found no radios right now — falling back to: ${BSSLIST:-<nothing>}"
+                fi
                 run=$(cat /tmp/roam-detect/bsslist 2>/dev/null)
                 [ -n "$run" ] && [ "$run" != "$BSSLIST" ] && note "BSSLIST drift pending: daemons run '$run' — the watchdog restarts them within ~2 min"
               else
@@ -151,13 +179,24 @@ case "$1" in
                 BSSLIST="wl0.1 wl1.1 wl2.1"
               fi
             fi
+            missing=
             for b in $BSSLIST; do
               if [ -d "/sys/class/net/$b" ]; then
                 [ -d "/sys/class/net/br0/brif/$b" ] && ok "BSS $b exists, member of br0" || note "BSS $b exists but is NOT in br0 — check BSSLIST"
               else
-                bad "BSS $b does not exist — set BSSLIST in $CONF (br0 members: $(ls /sys/class/net/br0/brif 2>/dev/null | tr '\n' ' '))"
+                missing=1
+                bad "BSS $b does not exist — check BSSLIST in $CONF (br0 members: $(ls /sys/class/net/br0/brif 2>/dev/null | tr '\n' ' '))"
               fi
             done
+            # Auto found nothing usable and fell back to the static default:
+            # this model's radio naming is unknown to us. Hand the user the
+            # exact probe we'd otherwise ask them for by hand.
+            if [ -n "$missing" ] && [ "$confmode" = "auto" ]; then
+              note "auto-detect found no usable radios on this model — probe with:"
+              note '  for b in $(ls /sys/class/net/br0/brif); do echo "$b: $(wl -i $b ssid 2>&1)"; done'
+              note "  then set BSSLIST=\"<members that print your SSID>\" in $CONF"
+              note "  and please report the probe output — auto should not need help"
+            fi
             # --- runtime ---
             [ "$(policy)" = "on" ] && ok "policy on" || note "policy off — daemons disabled persistently (roamctl policy on)"
             [ -f "$FLUSHFLAG" ] && ok "auto-flush on" || note "auto-flush off — audit-only mode (roamctl flush on)"
@@ -190,6 +229,7 @@ case "$1" in
             cru d roam-detect-wd 2>/dev/null
             SS=/jffs/scripts/services-start
             [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
+            [ -f /jffs/configs/profile.add ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" /jffs/configs/profile.add
             rm -f "$DAEMON" "$EVDAEMON" /jffs/scripts/roam-lib.sh "$POLICY" "$FLAG" "$FLUSHFLAG" "$CONF" /tmp/roam-events.pid "$UPDATE_TMP"
             rm -rf /tmp/roam-detect
             logger -t "$TAG" "uninstalled"

@@ -14,6 +14,9 @@ REPO_RAW="https://raw.githubusercontent.com/deviationist/asuswrt-merlin-flowcach
 DEST=/jffs/scripts
 SS=$DEST/services-start
 CRU_ID=roam-detect-wd
+# Merlin's shell-customization hook, sourced from /etc/profile at login.
+PROFILE=/jffs/configs/profile.add
+ALIAS_TAG="# flowcache-doctor"
 
 fail() { echo "ERROR: $1" >&2; exit 1; }
 
@@ -26,9 +29,11 @@ if [ "$1" = "uninstall" ]; then
   [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop 2>/dev/null
   cru d "$CRU_ID" 2>/dev/null
   [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
+  [ -f "$PROFILE" ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" "$PROFILE"
   rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roamctl" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
   rm -rf /tmp/roam-detect
   echo "flowcache-doctor uninstalled."
+  echo "(the 'roamctl' alias stays live in THIS shell until you log out)"
   exit 0
 fi
 
@@ -54,6 +59,12 @@ if [ ! -f "$SS" ]; then printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; fi
 grep -q "roamctl boot" "$SS" || echo "$DEST/roamctl boot" >> "$SS"
 grep -q "$CRU_ID" "$SS" || echo "cru a $CRU_ID \"* * * * * $DEST/roamctl watchdog\"" >> "$SS"
 
+# Make `roamctl` callable by bare name in interactive shells (idempotent).
+# profile.add is sourced, not executed — 644 is correct, no shebang needed.
+mkdir -p /jffs/configs
+[ -f "$PROFILE" ] || { : > "$PROFILE"; chmod 644 "$PROFILE"; }
+grep -q "^alias roamctl=" "$PROFILE" || echo "alias roamctl='$DEST/roamctl'   $ALIAS_TAG" >> "$PROFILE"
+
 # Fresh installs heal out of the box (audit-only available: roamctl flush off)
 [ "$FRESH" = "1" ] && touch "$DEST/roam-detect.flush"
 
@@ -76,6 +87,9 @@ Watched interfaces are AUTO-DETECTED (works on routers and AiMesh nodes;
 the health check above shows what was resolved, and changes to your
 Wi-Fi networks are picked up automatically within ~2 minutes). To pin an
 explicit list instead, set BSSLIST="..." in /jffs/scripts/roam-detect.conf.
+
+From your NEXT login you can type plain "roamctl" instead of the full path
+(an alias was added to /jffs/configs/profile.add). Until then, use the path:
 
 Useful commands:
   /jffs/scripts/roamctl log         # what it has detected and healed
