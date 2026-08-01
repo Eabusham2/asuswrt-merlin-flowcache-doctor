@@ -1,6 +1,7 @@
 #!/bin/sh
 # Enforce the user-facing AirIQ setting without touching Wi-Fi, MLO, channels, or flow cache.
-# Explicit global airiq_enable=0 stops AirIQ. Explicit airiq_enable=1 ensures its monitor is running.
+# Explicit airiq_enable=0 stops AirIQ. Explicit airiq_enable=1 starts it if missing,
+# but each detected enabled session is capped and forced Off after 10 minutes by default.
 
 set -u
 LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
@@ -10,8 +11,10 @@ STATE=${FCD_STATE:-/tmp/flowcache-doctor}
 INTERVAL=${FCD_AIRIQ_GUARD_INTERVAL:-10}
 KILL_GRACE=${FCD_AIRIQ_KILL_GRACE:-2}
 START_GRACE=${FCD_AIRIQ_START_GRACE:-4}
+MAX_ON_SECONDS=${FCD_AIRIQ_MAX_ON_SECONDS:-600}
 PIDFILE="$STATE/airiq-guard.pid"
 LOCK="$STATE/airiq-guard.lock"
+ON_SINCE="$STATE/airiq-on-since"
 
 log_msg() {
   if command -v fcd_log >/dev/null 2>&1; then
@@ -22,10 +25,13 @@ log_msg() {
 }
 
 num_ok() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
+now_epoch() { date +%s; }
 num_ok "$INTERVAL" || INTERVAL=10
 num_ok "$KILL_GRACE" || KILL_GRACE=2
 num_ok "$START_GRACE" || START_GRACE=4
+num_ok "$MAX_ON_SECONDS" || MAX_ON_SECONDS=600
 [ "$INTERVAL" -ge 5 ] || INTERVAL=5
+[ "$MAX_ON_SECONDS" -ge 60 ] || MAX_ON_SECONDS=60
 
 list_airiq_pids() {
   for _name in airiq_monitor airiq_service airiq_app; do
@@ -131,20 +137,46 @@ ensure_airiq_started() {
   fi
 }
 
+enforce_enabled_timeout() {
+  _details=$(process_details)
+  [ "$_details" != none ] || { rm -f "$ON_SINCE"; return 0; }
+
+  _now=$(now_epoch)
+  num_ok "$_now" || return 0
+  _since=$(cat "$ON_SINCE" 2>/dev/null)
+  if ! num_ok "$_since" || [ "$_since" -gt "$_now" ]; then
+    printf '%s\n' "$_now" > "$ON_SINCE"
+    log_msg AIRIQ-TIMER "global=1 started=$_now max=${MAX_ON_SECONDS}s"
+    return 0
+  fi
+
+  _elapsed=$((_now - _since))
+  [ "$_elapsed" -lt "$MAX_ON_SECONDS" ] && return 0
+
+  log_msg AIRIQ-TIMEOUT "global=1 elapsed=${_elapsed}s limit=${MAX_ON_SECONDS}s action=force-off commit=no processes=$_details"
+  nvram set airiq_enable=0
+  sync_hidden_off_flags
+  stop_airiq
+  rm -f "$ON_SINCE"
+}
+
 check_once() {
+  mkdir -p "$STATE"
   _global=$(nvram get airiq_enable 2>/dev/null)
   case "$_global" in
     0)
+      rm -f "$ON_SINCE"
       sync_hidden_off_flags
       stop_airiq
       ;;
     1)
       ensure_airiq_started
+      enforce_enabled_timeout
       ;;
     *)
+      rm -f "$ON_SINCE"
       _marker="$STATE/airiq-unknown.warned"
       if [ ! -f "$_marker" ]; then
-        mkdir -p "$STATE"
         : > "$_marker"
         log_msg AIRIQ-WARN "global-setting=${_global:-missing}; guard took no action"
       fi
@@ -207,9 +239,14 @@ case "${1:-daemon}" in
     _global=$(nvram get airiq_enable 2>/dev/null)
     _gpids=$(list_guard_pids)
     _gcount=$(printf '%s\n' "$_gpids" | awk 'NF{n++} END{print n+0}')
+    _elapsed=0
+    _since=$(cat "$ON_SINCE" 2>/dev/null)
+    _now=$(now_epoch)
+    if num_ok "$_since" && num_ok "$_now" && [ "$_now" -ge "$_since" ]; then _elapsed=$((_now - _since)); fi
     echo "AirIQ guard: $([ "$_gcount" -gt 0 ] && echo running || echo stopped)${_gpids:+ (pids $(printf '%s' "$_gpids" | tr '\n' ',' | sed 's/,$//'))}"
     echo "guard instances: $_gcount"
     echo "global airiq_enable: ${_global:-missing}"
+    echo "enabled-session cap: ${MAX_ON_SECONDS}s (elapsed ${_elapsed}s)"
     echo "indexed flags: $(for _v in '0:airiq_enable' '1:airiq_enable' '2:airiq_enable' '3:airiq_enable'; do _x=$(nvram get "$_v" 2>/dev/null); [ -n "$_x" ] && printf '%s=%s ' "$_v" "$_x"; done)"
     echo "AirIQ processes: $(process_details)"
     exit 0
@@ -229,7 +266,7 @@ printf '%s\n' $$ > "$PIDFILE"
 cleanup() { rm -f "$PIDFILE"; rmdir "$LOCK" 2>/dev/null; }
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM HUP
-log_msg START "airiq-guard pid=$$ interval=${INTERVAL}s"
+log_msg START "airiq-guard pid=$$ interval=${INTERVAL}s max-on=${MAX_ON_SECONDS}s"
 
 while :; do
   check_once
