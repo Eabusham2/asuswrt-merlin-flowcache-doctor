@@ -101,23 +101,33 @@ stop_airiq() {
 }
 
 ensure_airiq_started() {
+  _started=0
+  _marker="$STATE/airiq-start-failed.warned"
   _monitor=$(pidof airiq_monitor 2>/dev/null)
   if [ -z "$_monitor" ]; then
     _bin=$(which airiq_monitor 2>/dev/null)
     if [ -z "$_bin" ] || [ ! -x "$_bin" ]; then
-      log_msg AIRIQ-START-FAIL "global=1 airiq_monitor-unavailable"
+      if [ ! -f "$_marker" ]; then
+        : > "$_marker"
+        log_msg AIRIQ-START-FAIL "global=1 airiq_monitor-unavailable"
+      fi
       return 0
     fi
     log_msg AIRIQ-START "global=1 action=start-monitor binary=$_bin"
     "$_bin" >/dev/null 2>&1 &
+    _started=1
     sleep "$START_GRACE"
   fi
 
   _after=$(process_details)
   if [ "$_after" = none ]; then
-    log_msg AIRIQ-START-FAIL "global=1 no-airiq-processes-after-start"
+    if [ ! -f "$_marker" ]; then
+      : > "$_marker"
+      log_msg AIRIQ-START-FAIL "global=1 no-airiq-processes-after-start"
+    fi
   else
-    log_msg AIRIQ-ON "global=1 processes=$_after"
+    rm -f "$_marker"
+    [ "$_started" = 1 ] && log_msg AIRIQ-ON "global=1 processes=$_after"
   fi
 }
 
