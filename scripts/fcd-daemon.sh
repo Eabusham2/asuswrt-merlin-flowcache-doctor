@@ -16,6 +16,7 @@ printf '%s\n' $$ > "$PIDFILE"
 cleanup(){ rm -f "$PIDFILE" "$FCD_STATE/.map.$$" "$FCD_STATE/.mlo.$$"; rmdir "$LOCK" 2>/dev/null; }
 trap cleanup EXIT INT TERM
 fcd_log START "daemon pid=$$ interval=${FCD_INTERVAL}s"
+[ -f "$FCD_STATE/nvram.start.bytes" ] || nvram show 2>/dev/null | wc -c | tr -d ' ' > "$FCD_STATE/nvram.start.bytes"
 
 process_events() {
   _q="$FCD_EVENT_QUEUE"; _w="$FCD_STATE/events.$$.work"
@@ -73,6 +74,7 @@ process_settle() {
 
 while :; do
   fcd_cleanup_logs
+  command -v fcd_cleanup_incidents >/dev/null 2>&1 && fcd_cleanup_incidents
   BSSLIST=$(fcd_resolve_bsslist)
   if [ -z "$BSSLIST" ]; then
     [ -f "$FCD_STATE/no-bss.warned" ] || { fcd_log WARN "no roamable BSS interfaces resolved"; : > "$FCD_STATE/no-bss.warned"; }
