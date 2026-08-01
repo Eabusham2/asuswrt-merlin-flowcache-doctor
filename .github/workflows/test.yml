@@ -9,4 +9,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y busybox
-      - run: chmod +x tests/*.sh && tests/audit-static.sh && python3 tests/audit-line-by-line-1.py && python3 tests/audit-line-by-line-2.py && tests/test-runtime.sh && tests/test-mlo-safety.sh && tests/test-gtbe19000ai-live-format.sh && tests/test-incident-capture.sh && tests/test-airiq-guard.sh && tests/test-no-runtime-macs.sh && tests/test-daemon-sim.sh && sudo -E tests/test-install-sim.sh
+      - run: chmod +x tests/*.sh && tests/audit-static.sh && python3 tests/audit-line-by-line-1.py && python3 tests/audit-line-by-line-2.py && tests/test-runtime.sh && tests/test-mlo-safety.sh && tests/test-gtbe19000ai-live-format.sh && tests/test-incident-capture.sh && tests/test-airiq-guard.sh && tests/test-airiq-time-cap.sh && tests/test-no-runtime-macs.sh && tests/test-daemon-sim.sh && sudo -E tests/test-install-sim.sh
