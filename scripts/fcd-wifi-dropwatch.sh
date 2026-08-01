@@ -15,6 +15,7 @@ UTIL_DELTA=${FCD_DROPWATCH_UTIL_DELTA:-30}
 PUBLIC_IP=${FCD_PROBE_IP:-1.1.1.1}
 RING_LINES=${FCD_DROPWATCH_RING_LINES:-240}
 COOLDOWN=${FCD_DROPWATCH_COOLDOWN:-120}
+RETENTION_DAYS=${FCD_DROPWATCH_RETENTION_DAYS:-30}
 PIDFILE="$STATE/dropwatch.pid"
 LOCK="$STATE/dropwatch.lock"
 RING="$STATE/dropwatch-ring.tsv"
@@ -22,12 +23,13 @@ LAST="$STATE/dropwatch-last"
 LAST_EVENT="$STATE/dropwatch-last-event"
 
 num_ok(){ case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
-for V in INTERVAL UTIL_HIGH UTIL_DELTA RING_LINES COOLDOWN; do
+for V in INTERVAL UTIL_HIGH UTIL_DELTA RING_LINES COOLDOWN RETENTION_DAYS; do
   eval X=\$$V
   num_ok "$X" || eval "$V=2"
 done
 [ "$INTERVAL" -ge 1 ] || INTERVAL=2
 [ "$RING_LINES" -ge 60 ] || RING_LINES=240
+[ "$RETENTION_DAYS" -ge 1 ] || RETENTION_DAYS=30
 
 list_pids(){
   ps w 2>/dev/null | awk '$1~/^[0-9]+$/ && $0~/\/jffs\/scripts\/fcd-wifi-dropwatch[.]sh daemon/{print $1}' | sort -n -u
@@ -65,12 +67,30 @@ trim_ring(){
   tail -n "$RING_LINES" "$RING" 2>/dev/null > "$_tmp" && mv "$_tmp" "$RING"
 }
 
+cleanup_old(){
+  _today=$(date '+%Y%m%d')
+  _marker="$STATE/dropwatch-cleanup.$_today"
+  [ -f "$_marker" ] && return 0
+  rm -f "$STATE"/dropwatch-cleanup.* 2>/dev/null
+  : > "$_marker"
+  find "$ROOT/dropwatch" -type d -mtime +"$RETENTION_DAYS" 2>/dev/null |
+  while IFS= read -r _d; do
+    case "$_d" in
+      "$ROOT/dropwatch"|"$ROOT/dropwatch/") ;;
+      "$ROOT/dropwatch"/*) rm -rf "$_d";;
+    esac
+  done
+}
+
 snapshot(){
   _reason=$1
+  _force=${2:-0}
   _now=$(date +%s)
   _last=$(cat "$LAST_EVENT" 2>/dev/null)
   num_ok "$_last" || _last=0
-  [ "$((_now - _last))" -ge "$COOLDOWN" ] || return 0
+  if [ "$_force" != 1 ] && [ "$((_now - _last))" -lt "$COOLDOWN" ]; then
+    return 0
+  fi
   printf '%s\n' "$_now" > "$LAST_EVENT"
 
   _stamp=$(date '+%Y%m%d-%H%M%S')
@@ -85,6 +105,7 @@ snapshot(){
     echo "bsslist: $(bsslist)"
     echo "airiq_enable: $(nvram get airiq_enable 2>/dev/null)"
     echo "airiq_processes: $(pidof airiq_monitor airiq_service airiq_app 2>/dev/null)"
+    echo "retention_days: $RETENTION_DAYS"
   } > "$_dir/meta.txt"
 
   {
@@ -106,6 +127,7 @@ snapshot(){
 
   printf '%s\n' "$_dir" > "$STATE/dropwatch-latest"
   command -v fcd_log >/dev/null 2>&1 && fcd_log DROPWATCH "reason=$_reason dir=$_dir"
+  cleanup_old
   echo "Captured: $_dir"
 }
 
@@ -118,19 +140,25 @@ check_trigger(){
   num_ok "$_prev" || _prev=$_max
   printf '%s\n' "$_max" > "$LAST"
   _delta=$((_max - _prev)); [ "$_delta" -lt 0 ] && _delta=$((-_delta))
-  if [ "$_max" -ge "$UTIL_HIGH" ]; then snapshot "util-high-${_max}"; return; fi
-  if [ "$_delta" -ge "$UTIL_DELTA" ]; then snapshot "util-delta-${_prev}-to-${_max}"; return; fi
-  [ "$_bad" = 1 ] && snapshot "chanim-read-failure"
+  if [ "$_max" -ge "$UTIL_HIGH" ]; then snapshot "util-high-${_max}" 0; return; fi
+  if [ "$_delta" -ge "$UTIL_DELTA" ]; then snapshot "util-delta-${_prev}-to-${_max}" 0; return; fi
+  [ "$_bad" = 1 ] && snapshot "chanim-read-failure" 0
 }
 
 start_daemon(){
   mkdir -p "$STATE" "$ROOT/dropwatch"
+  cleanup_old
   _pids=$(list_pids)
   _count=$(printf '%s\n' "$_pids" | awk 'NF{n++}END{print n+0}')
   if [ "$_count" -gt 0 ]; then
     _keep=$(printf '%s\n' "$_pids" | awk 'NF{print;exit}')
     printf '%s\n' "$_keep" > "$PIDFILE"
-    for _p in $_pids; do [ "$_p" = "$_keep" ] || kill "$_p" 2>/dev/null; done
+    for _p in $_pids; do
+      [ "$_p" = "$_keep" ] && continue
+      kill "$_p" 2>/dev/null
+      sleep 1
+      pid_alive "$_p" && kill -9 "$_p" 2>/dev/null
+    done
     return 0
   fi
   rm -rf "$LOCK" 2>/dev/null
@@ -144,6 +172,19 @@ stop_daemon(){
   rm -f "$PIDFILE"; rm -rf "$LOCK" 2>/dev/null
 }
 
+health(){
+  _rc=0
+  _pids=$(list_pids)
+  _count=$(printf '%s\n' "$_pids" | awk 'NF{n++}END{print n+0}')
+  [ "$_count" -eq 1 ] && echo "  ok: exactly one dropwatch daemon" || { echo "  FAIL: dropwatch instances=$_count"; _rc=1; }
+  [ -x /jffs/scripts/fcd-wifi-dropwatch.sh ] && echo "  ok: dropwatch executable" || { echo "  FAIL: dropwatch missing"; _rc=1; }
+  grep -q 'fcd-wifi-dropwatch.sh start' /jffs/scripts/services-start 2>/dev/null && echo "  ok: boot hook installed" || { echo "  FAIL: boot hook missing"; _rc=1; }
+  cru l 2>/dev/null | grep -q fcd-wifi-dropwatch && echo "  ok: cron watchdog armed" || { echo "  FAIL: cron watchdog missing"; _rc=1; }
+  [ -d "$ROOT/dropwatch" ] && echo "  ok: capture directory present" || { echo "  FAIL: capture directory missing"; _rc=1; }
+  echo "  ok: retention ${RETENTION_DAYS} days"
+  return "$_rc"
+}
+
 case "${1:-daemon}" in
   start) start_daemon; exit 0;;
   stop) stop_daemon; exit 0;;
@@ -154,12 +195,15 @@ case "${1:-daemon}" in
     echo "pids: ${_pids:-none}"
     echo "interval: ${INTERVAL}s"
     echo "automatic triggers: busy>=${UTIL_HIGH}% or delta>=${UTIL_DELTA} points or CHANIM read failure"
+    echo "retention: ${RETENTION_DAYS} days"
     echo "ring: $RING"
     echo "latest: $(cat "$STATE/dropwatch-latest" 2>/dev/null || echo none)"
     exit 0;;
+  health) health; exit $?;;
+  cleanup) cleanup_old; echo "dropwatch cleanup complete (${RETENTION_DAYS}-day retention)"; exit 0;;
   mark)
     shift
-    snapshot "manual-${*:-after-drop}"
+    snapshot "manual-${*:-after-drop}" 1
     exit $?;;
   latest)
     _d=$(cat "$STATE/dropwatch-latest" 2>/dev/null)
@@ -168,7 +212,7 @@ case "${1:-daemon}" in
     echo "directory: $_d"
     exit 0;;
   daemon) :;;
-  *) echo "usage: $0 start|stop|status|mark [reason]|latest|daemon"; exit 1;;
+  *) echo "usage: $0 start|stop|status|health|cleanup|mark [reason]|latest|daemon"; exit 1;;
 esac
 
 mkdir -p "$STATE" "$ROOT/dropwatch"
@@ -177,11 +221,14 @@ printf '%s\n' $$ > "$PIDFILE"
 cleanup(){ rm -f "$PIDFILE"; rmdir "$LOCK" 2>/dev/null; }
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM HUP
-: > "$RING"
+touch "$RING"
+trim_ring
+cleanup_old
 while :; do
   LINE=$(sample_line)
   printf '%s\n' "$LINE" >> "$RING"
   trim_ring
   check_trigger "$LINE"
+  cleanup_old
   sleep "$INTERVAL"
 done
