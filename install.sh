@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.2-mlo-safe-auto
+VERSION=1.0.3-mlo-safe-auto
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -9,7 +9,7 @@ PROFILE=/jffs/configs/profile.add
 TMP=/tmp/flowcache-doctor-install.$$
 BACKUP=$ROOT/backup-$(date '+%Y%m%d-%H%M%S')
 STAGE=0
-FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh roamctl"
+FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-incident.sh roamctl"
 
 rollback(){
   [ "$STAGE" = "1" ] || return 0
@@ -17,10 +17,10 @@ rollback(){
   [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
   cru d flowcache-doctor-watchdog 2>/dev/null
   rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
-    "$DEST/fcd-events.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
+    "$DEST/fcd-events.sh" "$DEST/fcd-incident.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
     "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
   for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh flowcache-doctor.conf \
+    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-incident.sh flowcache-doctor.conf \
     flowcache-doctor-uninstall.sh; do
     [ -e "$BACKUP/$f" ] && cp -p "$BACKUP/$f" "$DEST/$f"
   done
@@ -40,7 +40,7 @@ mkdir -p "$TMP" "$DEST" "$ROOT" "$BACKUP" /jffs/configs
 
 [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
 for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh flowcache-doctor.conf \
+  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-incident.sh flowcache-doctor.conf \
   flowcache-doctor-uninstall.sh; do
   [ -e "$DEST/$f" ] && cp -p "$DEST/$f" "$BACKUP/$f"
 done
@@ -76,11 +76,17 @@ FCD_LOG_RETENTION_DAYS=30
 FCD_STEER_MODE=advisor
 FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
-# Passive congestion correlation only; these settings never steer or restart Wi-Fi.
+
+# Passive congestion correlation. It never steers, restarts, changes channels, or flushes a radio.
 FCD_UTIL_HIGH=85
 FCD_UTIL_RECOVER=65
-FCD_UTIL_SPIKE_DELTA=25
+FCD_UTIL_SPIKE_DELTA=20
 FCD_UTIL_LOG_COOLDOWN=60
+FCD_INCIDENT_CAPTURE=1
+FCD_INCIDENT_SAMPLES=6
+FCD_INCIDENT_SAMPLE_INTERVAL=2
+FCD_INCIDENT_COOLDOWN=120
+FCD_PROBE_IP=1.1.1.1
 EOFCONF
 sh -n "$TMP/flowcache-doctor.conf" || fail "default config invalid"
 
@@ -94,6 +100,7 @@ chmod 755 "$DEST/flowcache-doctor-uninstall.sh"
 cp "$TMP/flowcache-doctor.conf" "$DEST/flowcache-doctor.conf" || fail "install failed: config"
 chmod 644 "$DEST/flowcache-doctor.conf"
 
+# Remove upstream runtime scripts only after the replacement is complete.
 rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" \
   "$DEST/roam-detect.conf" "$DEST/roam-detect.flush" "$DEST/roam-detect.policy" \
   "$DEST/roam-nonmlo.allow" "$DEST/roam-mlo.ignore"
@@ -115,6 +122,7 @@ rm -rf /tmp/flowcache-doctor
 sleep 3
 "$DEST/roamctl" health || fail "installed files failed health check; previous version restored; backup is at $BACKUP"
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
+[ -x "$DEST/fcd-incident.sh" ] || fail "incident capture missing after install"
 STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
