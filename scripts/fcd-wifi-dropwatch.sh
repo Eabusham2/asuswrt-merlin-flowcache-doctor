@@ -1,6 +1,6 @@
 #!/bin/sh
 # Passive router-side Wi-Fi drop recorder for Asuswrt-Merlin.
-# Keeps a RAM ring buffer and writes to JFFS only on an anomaly or manual mark.
+# Keeps a RAM ring buffer and writes to JFFS only on a >=94% utilization event or manual mark.
 
 set -u
 LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
@@ -10,8 +10,7 @@ LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
 STATE=${FCD_STATE:-/tmp/flowcache-doctor}
 ROOT=${FCD_ROOT:-/jffs/flowcache-doctor}
 INTERVAL=${FCD_DROPWATCH_INTERVAL:-2}
-UTIL_HIGH=${FCD_DROPWATCH_UTIL_HIGH:-80}
-UTIL_DELTA=${FCD_DROPWATCH_UTIL_DELTA:-30}
+UTIL_HIGH=${FCD_DROPWATCH_UTIL_HIGH:-94}
 PUBLIC_IP=${FCD_PROBE_IP:-1.1.1.1}
 RING_LINES=${FCD_DROPWATCH_RING_LINES:-240}
 COOLDOWN=${FCD_DROPWATCH_COOLDOWN:-120}
@@ -19,15 +18,15 @@ RETENTION_DAYS=${FCD_DROPWATCH_RETENTION_DAYS:-30}
 PIDFILE="$STATE/dropwatch.pid"
 LOCK="$STATE/dropwatch.lock"
 RING="$STATE/dropwatch-ring.tsv"
-LAST="$STATE/dropwatch-last"
 LAST_EVENT="$STATE/dropwatch-last-event"
 
 num_ok(){ case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
-for V in INTERVAL UTIL_HIGH UTIL_DELTA RING_LINES COOLDOWN RETENTION_DAYS; do
+for V in INTERVAL UTIL_HIGH RING_LINES COOLDOWN RETENTION_DAYS; do
   eval X=\$$V
   num_ok "$X" || eval "$V=2"
 done
 [ "$INTERVAL" -ge 1 ] || INTERVAL=2
+[ "$UTIL_HIGH" -ge 1 ] && [ "$UTIL_HIGH" -le 100 ] || UTIL_HIGH=94
 [ "$RING_LINES" -ge 60 ] || RING_LINES=240
 [ "$RETENTION_DAYS" -ge 1 ] || RETENTION_DAYS=30
 
@@ -105,6 +104,7 @@ snapshot(){
     echo "bsslist: $(bsslist)"
     echo "airiq_enable: $(nvram get airiq_enable 2>/dev/null)"
     echo "airiq_processes: $(pidof airiq_monitor airiq_service airiq_app 2>/dev/null)"
+    echo "automatic_utilization_floor: ${UTIL_HIGH}%"
     echo "retention_days: $RETENTION_DAYS"
   } > "$_dir/meta.txt"
 
@@ -120,7 +120,11 @@ snapshot(){
   { ip addr 2>&1; ip link 2>&1; ip neigh 2>&1; brctl show 2>&1; brctl showmacs br0 2>&1; } > "$_dir/network.txt"
   ps w > "$_dir/processes.txt" 2>&1
   dmesg | tail -n 400 > "$_dir/dmesg.txt" 2>&1
-  logread | tail -n 800 > "$_dir/syslog.txt" 2>&1
+  if logread >/dev/null 2>&1; then
+    logread 2>/dev/null | tail -n 800 > "$_dir/syslog.txt"
+  else
+    : > "$_dir/syslog.txt"
+  fi
   {
     nvram show 2>/dev/null | grep -Ei '^(wl[0-9_:.].*(channel|chanspec|bw|bandwidth|mode|nmode|mlo|ssid|auth|crypto)|smart_connect|airiq|acs|territory|regulation)' | sort
   } > "$_dir/wifi-nvram.txt"
@@ -134,15 +138,8 @@ snapshot(){
 check_trigger(){
   _line=$1
   _max=$(printf '%s\n' "$_line" | sed -n 's/.*maxbusy=\([-0-9]*\).*/\1/p')
-  _bad=$(printf '%s\n' "$_line" | sed -n 's/.*chanim_bad=\([01]\).*/\1/p')
-  num_ok "$_max" || _max=0
-  _prev=$(cat "$LAST" 2>/dev/null)
-  num_ok "$_prev" || _prev=$_max
-  printf '%s\n' "$_max" > "$LAST"
-  _delta=$((_max - _prev)); [ "$_delta" -lt 0 ] && _delta=$((-_delta))
-  if [ "$_max" -ge "$UTIL_HIGH" ]; then snapshot "util-high-${_max}" 0; return; fi
-  if [ "$_delta" -ge "$UTIL_DELTA" ]; then snapshot "util-delta-${_prev}-to-${_max}" 0; return; fi
-  [ "$_bad" = 1 ] && snapshot "chanim-read-failure" 0
+  num_ok "$_max" || return 0
+  [ "$_max" -ge "$UTIL_HIGH" ] && snapshot "util-high-${_max}" 0
 }
 
 start_daemon(){
@@ -181,6 +178,7 @@ health(){
   grep -q 'fcd-wifi-dropwatch.sh start' /jffs/scripts/services-start 2>/dev/null && echo "  ok: boot hook installed" || { echo "  FAIL: boot hook missing"; _rc=1; }
   cru l 2>/dev/null | grep -q fcd-wifi-dropwatch && echo "  ok: cron watchdog armed" || { echo "  FAIL: cron watchdog missing"; _rc=1; }
   [ -d "$ROOT/dropwatch" ] && echo "  ok: capture directory present" || { echo "  FAIL: capture directory missing"; _rc=1; }
+  echo "  ok: automatic utilization floor ${UTIL_HIGH}%"
   echo "  ok: retention ${RETENTION_DAYS} days"
   return "$_rc"
 }
@@ -194,7 +192,8 @@ case "${1:-daemon}" in
     echo "instances: $_count"
     echo "pids: ${_pids:-none}"
     echo "interval: ${INTERVAL}s"
-    echo "automatic triggers: busy>=${UTIL_HIGH}% or delta>=${UTIL_DELTA} points or CHANIM read failure"
+    echo "automatic capture: busy>=${UTIL_HIGH}% only"
+    echo "below ${UTIL_HIGH}%: RAM sampling only; no automatic JFFS capture"
     echo "retention: ${RETENTION_DAYS} days"
     echo "ring: $RING"
     echo "latest: $(cat "$STATE/dropwatch-latest" 2>/dev/null || echo none)"
