@@ -113,10 +113,42 @@ check_once() {
   esac
 }
 
-if [ "${1:-}" = once ]; then
-  check_once
-  exit 0
-fi
+pid_alive() { [ -n "${1:-}" ] && [ -d "/proc/$1" ]; }
+
+case "${1:-daemon}" in
+  once)
+    check_once
+    exit 0
+    ;;
+  start)
+    mkdir -p "$STATE"
+    _pid=$(cat "$PIDFILE" 2>/dev/null)
+    if pid_alive "$_pid"; then
+      exit 0
+    fi
+    "$0" daemon >/dev/null 2>&1 &
+    exit 0
+    ;;
+  stop)
+    _pid=$(cat "$PIDFILE" 2>/dev/null)
+    pid_alive "$_pid" && kill "$_pid" 2>/dev/null
+    rm -f "$PIDFILE"
+    sleep 1
+    rm -rf "$LOCK" 2>/dev/null
+    exit 0
+    ;;
+  status)
+    _global=$(nvram get airiq_enable 2>/dev/null)
+    _pid=$(cat "$PIDFILE" 2>/dev/null)
+    echo "AirIQ guard: $(pid_alive "$_pid" && echo running || echo stopped)${_pid:+ (pid $_pid)}"
+    echo "global airiq_enable: ${_global:-missing}"
+    echo "indexed flags: $(for _v in '0:airiq_enable' '1:airiq_enable' '2:airiq_enable' '3:airiq_enable'; do _x=$(nvram get "$_v" 2>/dev/null); [ -n "$_x" ] && printf '%s=%s ' "$_v" "$_x"; done)"
+    echo "AirIQ processes: $(process_details)"
+    exit 0
+    ;;
+  daemon) :;;
+  *) echo "usage: $0 start|stop|status|once|daemon"; exit 1;;
+esac
 
 mkdir -p "$STATE"
 if ! mkdir "$LOCK" 2>/dev/null; then
