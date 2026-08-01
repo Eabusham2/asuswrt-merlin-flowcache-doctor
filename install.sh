@@ -1,111 +1,97 @@
 #!/bin/sh
-# install.sh — flowcache-doctor installer for Asuswrt-Merlin.
-#
-# Run ON the router (after enabling SSH + JFFS scripts, see README):
-#   curl -fsSL https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
-#
-# Or from a clone of this repo copied to the router:
-#   sh install.sh
-#
-# Uninstall (removes daemon, watchdog, boot hooks, state):
-#   sh install.sh uninstall
-
-REPO_RAW="https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main"
+set -u
+REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
+ROOT=/jffs/flowcache-doctor
 SS=$DEST/services-start
-CRU_ID=roam-detect-wd
-# Merlin's shell-customization hook, sourced from /etc/profile at login.
 PROFILE=/jffs/configs/profile.add
-ALIAS_TAG="# flowcache-doctor"
+TMP=/tmp/flowcache-doctor-install.$$
+BACKUP=$ROOT/backup-$(date '+%Y%m%d-%H%M%S')
+STAGE=0
+rollback(){
+  [ "$STAGE" = "1" ] || return 0
+  echo "Rolling back to the previous installation..." >&2
+  [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
+  cru d flowcache-doctor-watchdog 2>/dev/null
+  rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-daemon.sh" "$DEST/fcd-events.sh" "$DEST/roamctl" \
+    "$DEST/flowcache-doctor.conf" "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
+  for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh fcd-daemon.sh fcd-events.sh flowcache-doctor.conf flowcache-doctor-uninstall.sh; do
+    [ -e "$BACKUP/$f" ] && cp -p "$BACKUP/$f" "$DEST/$f"
+  done
+  [ -e "$BACKUP/services-start" ] && cp -p "$BACKUP/services-start" "$SS"
+  [ -e "$BACKUP/profile.add" ] && cp -p "$BACKUP/profile.add" "$PROFILE"
+  rm -rf /tmp/flowcache-doctor /tmp/roam-detect
+  [ -x "$DEST/roamctl" ] && "$DEST/roamctl" start >/dev/null 2>&1
+  [ -f "$SS" ] && grep 'cru a roam-detect-wd' "$SS" 2>/dev/null | sh >/dev/null 2>&1
+}
+fail(){ echo "ERROR: $*" >&2; rollback; rm -rf "$TMP"; exit 1; }
+[ -d /jffs ] || fail "/jffs is unavailable"
+[ "$(nvram get jffs2_scripts)" = "1" ] || fail "Enable JFFS custom scripts first"
+which curl >/dev/null 2>&1 || fail "curl is unavailable"
+which fcctl >/dev/null 2>&1 || fail "fcctl is unavailable"
+mkdir -p "$TMP" "$DEST" "$ROOT" "$BACKUP" /jffs/configs
 
-fail() { echo "ERROR: $1" >&2; exit 1; }
-
-[ -d /jffs ] || fail "no /jffs mount — is this an Asuswrt-Merlin router?"
-[ "$(nvram get jffs2_scripts)" = "1" ] || fail "JFFS custom scripts are disabled.
-Enable: Administration -> System -> 'Enable JFFS custom scripts and configs' = Yes,
-hit Apply, then re-run this installer."
-
-if [ "$1" = "uninstall" ]; then
-  [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop 2>/dev/null
-  cru d "$CRU_ID" 2>/dev/null
-  [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
-  [ -f "$PROFILE" ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" "$PROFILE"
-  rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" "$DEST/roamctl" "$DEST/roam-nonmlo.allow" "$DEST/roam-mlo.ignore" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
-  rm -rf /tmp/roam-detect
-  echo "flowcache-doctor uninstalled."
-  echo "(the 'roamctl' alias stays live in THIS shell until you log out)"
-  exit 0
-fi
-
-# Fresh install (no prior roamctl) => healing on out of the box. On
-# reinstall/update we respect the user's existing flush on/off choice.
-FRESH=0
-[ -f "$DEST/roamctl" ] || FRESH=1
-
-# Fetch scripts (prefer local copies when run from a checkout)
-mkdir -p "$DEST"
-for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl; do
-  if [ -f "./scripts/$f" ]; then
-    cp "./scripts/$f" "$DEST/$f"
-  else
-    # ?cb= busts the raw CDN cache — see roamctl update
-    curl -fsSL "$REPO_RAW/scripts/$f?cb=$(date +%s)" -o "$DEST/$f" || fail "download of $f failed"
-  fi
-  chmod 755 "$DEST/$f"
+# Stop any upstream/fork version before replacing files.
+[ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
+for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh fcd-daemon.sh fcd-events.sh flowcache-doctor.conf flowcache-doctor-uninstall.sh; do
+  [ -e "$DEST/$f" ] && cp -p "$DEST/$f" "$BACKUP/$f"
 done
+[ -e "$SS" ] && cp -p "$SS" "$BACKUP/services-start"
+[ -e "$PROFILE" ] && cp -p "$PROFILE" "$BACKUP/profile.add"
 
-# Boot hook + watchdog (idempotent)
-if [ ! -f "$SS" ]; then printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; fi
-grep -q "roamctl boot" "$SS" || echo "$DEST/roamctl boot" >> "$SS"
-grep -q "$CRU_ID" "$SS" || echo "cru a $CRU_ID \"* * * * * $DEST/roamctl watchdog\"" >> "$SS"
+for f in fcd-lib.sh fcd-daemon.sh fcd-events.sh roamctl; do
+  curl -fsSL "$REPO_RAW/scripts/$f?cb=$(date +%s)" -o "$TMP/$f" || fail "download failed: $f"
+  sh -n "$TMP/$f" || fail "syntax check failed: $f"
+done
+curl -fsSL "$REPO_RAW/uninstall.sh?cb=$(date +%s)" -o "$TMP/uninstall.sh" || fail "download failed: uninstall.sh"
+sh -n "$TMP/uninstall.sh" || fail "syntax check failed: uninstall.sh"
 
-# Make `roamctl` callable by bare name in interactive shells (idempotent).
-# profile.add is sourced, not executed — 644 is correct, no shebang needed.
-mkdir -p /jffs/configs
-[ -f "$PROFILE" ] || { : > "$PROFILE"; chmod 644 "$PROFILE"; }
-grep -q "^alias roamctl=" "$PROFILE" || echo "alias roamctl='$DEST/roamctl'   $ALIAS_TAG" >> "$PROFILE"
-
-# Fresh installs enable healing, but strict MLO safety means nothing is
-# flushed until a non-MLO MAC is explicitly authorized with roamctl allow.
-if [ "$FRESH" = "1" ]; then
-  touch "$DEST/roam-detect.flush"
-  [ -f "$DEST/roam-detect.conf" ] || cat > "$DEST/roam-detect.conf" <<'EOFCONF'
-MLO_SAFETY_MODE="strict"
+cat > "$TMP/flowcache-doctor.conf" <<'EOFCONF'
+# Automatic fail-closed safety: active EHT/11be, MLO, and unknown clients are never flushed.
+FCD_INTERVAL=2
+FCD_CONFIRMATIONS=5
+FCD_CONFIRM_MAX_AGE=8
+FCD_AUTOFIX=1
+FCD_EVENT_HEAL=1
+FCD_MIN_GAP=8
+FCD_COOLDOWN=60
+FCD_PENDING_TTL=60
+FCD_SETTLE_FLUSHES="20 60 300"
+FCD_LOG_RETENTION_DAYS=30
+FCD_STEER_MODE=advisor
+FCD_LOG_SYSLOG=0
+FCD_BSSLIST=auto
 EOFCONF
-fi
+sh -n "$TMP/flowcache-doctor.conf" || fail "default config invalid"
 
-# Arm now. restart, not start: on update the daemons are already running
-# the OLD code — start would no-op and leave stale processes; restart makes
-# the just-installed scripts take effect. (On fresh installs restart is
-# equivalent to start.)
-cru a "$CRU_ID" "* * * * * $DEST/roamctl watchdog"
-"$DEST/roamctl" restart
-sleep 2
-"$DEST/roamctl" health
+STAGE=1
+for f in fcd-lib.sh fcd-daemon.sh fcd-events.sh roamctl; do cp "$TMP/$f" "$DEST/$f" || fail "install failed: $f"; chmod 755 "$DEST/$f"; done
+cp "$TMP/uninstall.sh" "$DEST/flowcache-doctor-uninstall.sh" || fail "install failed: uninstall"; chmod 755 "$DEST/flowcache-doctor-uninstall.sh"
+cp "$TMP/flowcache-doctor.conf" "$DEST/flowcache-doctor.conf" || fail "install failed: config"; chmod 644 "$DEST/flowcache-doctor.conf"
 
-cat <<'EOF'
+# Remove upstream runtime scripts only after the replacement is complete.
+rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" \
+  "$DEST/roam-detect.conf" "$DEST/roam-detect.flush" "$DEST/roam-detect.policy" \
+  "$DEST/roam-nonmlo.allow" "$DEST/roam-mlo.ignore"
+rm -rf /tmp/roam-detect
+cru d roam-detect-wd 2>/dev/null
 
-Installed in STRICT MLO-SAFE mode. MLO and unclassified clients are never
-flushed. Add only known non-MLO clients with `roamctl allow <MAC>`; those
-clients then receive per-client, rate-limited healing (never a global flush). Restarts on crash (60s watchdog), survives reboots.
-The event listener runs automatically when your firmware provides
-/jffs/wifi_wlc.log; otherwise the 2s poller covers everything.
-Watched interfaces are AUTO-DETECTED (works on routers and AiMesh nodes;
-the health check above shows what was resolved, and changes to your
-Wi-Fi networks are picked up automatically within ~2 minutes). To pin an
-explicit list instead, set BSSLIST="..." in /jffs/scripts/roam-detect.conf.
-
-From your NEXT login you can type plain "roamctl" instead of the full path
-(an alias was added to /jffs/configs/profile.add). Until then, use the path:
-
-Useful commands:
-  /jffs/scripts/roamctl clients     # classifications and protected clients
-  /jffs/scripts/roamctl allow MAC   # authorize a known non-MLO client
-  /jffs/scripts/roamctl log         # what it has detected and healed
-  /jffs/scripts/roamctl status      # running? healing? listener? version?
-  /jffs/scripts/roamctl health      # full install + runtime health check
-  /jffs/scripts/roamctl flush off   # audit-only mode (log, don't heal)
-  /jffs/scripts/roamctl policy off  # disable persistently
-  /jffs/scripts/roamctl update      # self-update to the latest version
-  sh install.sh uninstall           # remove everything
-EOF
+[ -f "$SS" ] || { printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; }
+sed -i '/roamctl boot/d; /roam-detect-wd/d; /flowcache-doctor-watchdog/d' "$SS"
+printf '%s\n' "$DEST/roamctl boot" >> "$SS"
+printf '%s\n' 'cru a flowcache-doctor-watchdog "* * * * * /jffs/scripts/roamctl watchdog"' >> "$SS"
+cru d flowcache-doctor-watchdog 2>/dev/null
+cru a flowcache-doctor-watchdog "* * * * * $DEST/roamctl watchdog"
+[ -f "$PROFILE" ] || : > "$PROFILE"
+sed -i '/alias roamctl=.*flowcache-doctor/d' "$PROFILE"
+printf '%s\n' "alias roamctl='$DEST/roamctl' # flowcache-doctor" >> "$PROFILE"
+rm -f "$DEST/flowcache-doctor.disabled"
+rm -rf /tmp/flowcache-doctor
+"$DEST/roamctl" start
+sleep 3
+"$DEST/roamctl" health || fail "installed files failed health check; previous version restored; backup is at $BACKUP"
+STAGE=2
+rm -rf "$TMP"
+echo "Installed flowcache-doctor 1.0.0-mlo-safe-auto"
+echo "Backup of the previous version: $BACKUP"
+echo "Run: /jffs/scripts/roamctl clients"
