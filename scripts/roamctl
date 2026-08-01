@@ -38,6 +38,8 @@ case "$1" in
     echo "autofix: ${FCD_AUTOFIX:-1}"
     echo "steering: ${FCD_STEER_MODE:-advisor} (never force-steers)"
     echo "non-MLO confirmations: ${FCD_CONFIRMATIONS:-5}"
+    echo "unknown clients: MLO-safe fallback (never flushed)"
+    echo "utilization alerts: high ${FCD_UTIL_HIGH:-85}%, recover ${FCD_UTIL_RECOVER:-65}%, spike ${FCD_UTIL_SPIKE_DELTA:-25} points"
     echo "log retention: ${FCD_LOG_RETENTION_DAYS:-30} days"
     _p=$(cat "$STATE/daemon.pid" 2>/dev/null); pid_alive "$_p" && echo "daemon: running (pid $_p)" || echo "daemon: stopped"
     _e=$(cat "$STATE/events.pid" 2>/dev/null); pid_alive "$_e" && echo "events: running (pid $_e)" || echo "events: stopped/unsupported"
@@ -47,7 +49,7 @@ case "$1" in
     ok(){ echo "  ok: $*"; }; bad(){ echo "  FAIL: $*"; _rc=1; }; warn(){ echo "  warn: $*"; }
     echo "flowcache-doctor $VERSION health"
     [ "$(nvram get jffs2_scripts)" = "1" ] && ok "JFFS scripts enabled" || bad "JFFS scripts disabled"
-    for _f in "$LIB" "$DAEMON" "$EVENTS" /jffs/scripts/roamctl; do [ -x "$_f" ] && ok "executable $_f" || bad "missing/not executable $_f"; done
+    for _f in "$LIB" /jffs/scripts/fcd-platform-gtbe19000ai.sh "$DAEMON" "$EVENTS" /jffs/scripts/roamctl; do [ -x "$_f" ] && ok "executable $_f" || bad "missing/not executable $_f"; done
     which fcctl >/dev/null 2>&1 && ok "fcctl available" || bad "fcctl unavailable"
     [ -f "$CONF" ] && sh -n "$CONF" >/dev/null 2>&1 && ok "config parses" || bad "config missing or invalid"
     _b=$(fcd_resolve_bsslist); [ -n "$_b" ] && ok "BSS interfaces: $_b" || bad "no roamable BSS interfaces"
@@ -62,11 +64,11 @@ case "$1" in
     BSSLIST=$(fcd_resolve_bsslist); MAP="$STATE/.clients.$$"; MLO="$STATE/.mlo.clients.$$"; mkdir -p "$STATE"; : > "$MAP"; : > "$MLO"
     for _b in $BSSLIST; do wl -i "$_b" assoclist 2>/dev/null | awk -v b="$_b" '{if($2!="") print tolower($2),b}' >> "$MAP"; { wl -i "$_b" mlo 2>/dev/null; wl -i "$_b" mlo_status 2>/dev/null; } >> "$MLO"; done
     FCD_ASSOC_MAP="$MAP"; FCD_MLO_SNAPSHOT="$MLO"; export FCD_ASSOC_MAP FCD_MLO_SNAPSHOT
-    printf '%-18s %-22s %-28s %s\n' MAC RADIOS CLASSIFICATION CONFIRMED
+    printf '%-18s %-22s %-28s %-10s %s\n' MAC RADIOS CLASSIFICATION OBSERVED CONFIRMED
     for _m in $(awk '{print $1}' "$MAP" | sort -u); do
       _r=$(awk -v m="$_m" '$1==m{printf "%s%s",s,$2;s=","}' "$MAP"); _b=$(awk -v m="$_m" '$1==m{print $2;exit}' "$MAP")
-      _c=$(fcd_classify "$_m" "$_b" "$BSSLIST"); fcd_confirmed_nonmlo "$_m" "$_b" && _yes=yes || _yes=no
-      printf '%-18s %-22s %-28s %s\n' "$_m" "$_r" "$_c" "$_yes"
+      _c=$(fcd_classify "$_m" "$_b" "$BSSLIST"); _prog=$(fcd_confirmation_progress "$_m"); fcd_confirmed_nonmlo "$_m" "$_b" && _yes=yes || _yes=no
+      printf '%-18s %-22s %-28s %-10s %s\n' "$_m" "$_r" "$_c" "$_prog" "$_yes"
     done
     rm -f "$MAP" "$MLO"
     ;;
@@ -77,10 +79,19 @@ case "$1" in
     for _m in $(awk '{print $1}' "$MAP" | sort -u); do
       _b=$(awk -v m="$_m" '$1==m{print $2;exit}' "$MAP"); _c=$(fcd_classify "$_m" "$_b" "$BSSLIST")
       _r=$(fcd_client_rssi "$_b" "$_m"); _rates=$(fcd_client_rates "$_b" "$_m"); _u=$(fcd_radio_util "$_b")
-      case "$_c" in nonmlo-*) _note="Smart Connect owns band choice";; *) _note="protected; no steering";; esac
+      case "$_c" in nonmlo-*) _note="Smart Connect owns band choice";; *) _note="MLO-safe protected; no steering";; esac
       printf '%-18s %-12s %-8s %-12s %-8s %s\n' "$_m" "$_b" "${_r:-?}" "$_rates" "$_u" "$_note"
     done
     rm -f "$MAP"
+    ;;
+  util)
+    BSSLIST=$(fcd_resolve_bsslist)
+    printf '%-12s %-8s %s\n' BSS BUSY STATE
+    for _b in $BSSLIST; do
+      _u=$(fcd_radio_util "$_b"); _key=$(fcd_util_key "$_b"); _state=unknown
+      [ -f "$STATE/util/$_key" ] && IFS='|' read -r _last _state _lastlog < "$STATE/util/$_key"
+      printf '%-12s %-8s %s\n' "$_b" "${_u}%" "$_state"
+    done
     ;;
   log) cat "$FCD_LOG_DIR"/events-*.log 2>/dev/null | tail -n "${2:-100}";;
   cleanup) rm -f "$STATE"/cleanup.*; fcd_cleanup_logs; echo cleaned;;
@@ -91,5 +102,5 @@ case "$1" in
     exec sh "$_tmp"
     ;;
   uninstall) exec sh /jffs/scripts/flowcache-doctor-uninstall.sh;;
-  *) echo "usage: roamctl start|stop|restart|status|health|clients|advise|log [lines]|cleanup|update|enable|disable|uninstall"; exit 1;;
+  *) echo "usage: roamctl start|stop|restart|status|health|clients|advise|util|log [lines]|cleanup|update|enable|disable|uninstall"; exit 1;;
 esac
