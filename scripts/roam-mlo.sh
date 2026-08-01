@@ -88,9 +88,17 @@ mlo_classify_client() { # $1=mac $2=current-bss $3=bsslist
   _why=$(mlo_positive_evidence "$_mac" "$_bsslist") && { echo "$_why"; return; }
 
   # Explicit non-MLO authorization comes only after all positive MLO checks,
-  # so an accidentally double-listed MAC remains protected.
+  # so an accidentally double-listed MAC remains protected.  Also refuse an
+  # allowlisted EHT/Wi-Fi 7 station: it may be an MLD with only one visible
+  # link or incomplete CLI metadata.  Strict mode is intentionally for
+  # pre-EHT/non-MLO clients.
   if mlo_file_has_mac "$NON_MLO_ALLOW_FILE" "$_mac"; then
-    echo nonmlo-explicit
+    _allow_si=$(mlo_sta_info_all "$_mac" "$_bsslist")
+    if [ -n "$_allow_si" ] && echo "$_allow_si" | grep -Eiq '(EHT|802[.]11be|Wi-?Fi[[:space:]]*7)'; then
+      echo unknown-eht-allowlisted
+    else
+      echo nonmlo-explicit
+    fi
     return
   fi
 

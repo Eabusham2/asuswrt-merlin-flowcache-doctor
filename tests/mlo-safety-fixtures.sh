@@ -45,6 +45,12 @@ check "$(mlo_classify_client aa:bb:cc:dd:ee:ff wl0 'wl0 wl1 wl2')" mlo-sta-info 
 WL_CASE=mlo-table
 check "$(mlo_classify_client 02:00:00:00:00:02 wl1 'wl0 wl1 wl2')" mlo-status-table three-link-table-mac-protected
 
+
+MLO_SAFETY_MODE=strict
+WL_CASE=eht
+echo '20:30:40:50:60:70' >> "$NON_MLO_ALLOW_FILE"
+check "$(mlo_classify_client 20:30:40:50:60:70 wl0 'wl0 wl1 wl2')" unknown-eht-allowlisted accidental-eht-allowlist-still-protected
+
 MLO_SAFETY_MODE=auto
 WL_CASE=eht
 check "$(mlo_classify_client 10:20:30:40:50:60 wl0 'wl0 wl1 wl2')" unknown-eht-capable eht-without-mapping-still-protected

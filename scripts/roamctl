@@ -72,7 +72,8 @@ case "$1" in
             echo "policy: $(policy)"; echo "autoflush: $([ -f "$FLUSHFLAG" ] && echo on || echo off)"
             MLO_SAFETY_MODE=strict; [ -f "$CONF" ] && . "$CONF"
             echo "MLO safety: $MLO_SAFETY_MODE (fail-closed)"
-            echo "authorized non-MLO MACs: $(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null)"
+            cnt=0; [ -f "$NON_MLO_ALLOW_FILE" ] && cnt=$(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null)
+            echo "authorized non-MLO MACs: ${cnt:-0}"
             p=$(echo $(pids))     # word-split to one line (union can be multi-pid)
             if [ -n "$p" ]; then echo "running (pid $p)"; else echo "not running$([ -f $FLAG ] && echo ' (manually stopped)')"; fi
             if events_enabled; then
@@ -105,7 +106,7 @@ case "$1" in
             echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "usage: roamctl allow aa:bb:cc:dd:ee:ff"; exit 1; }
             mkdir -p /jffs/scripts; touch "$NON_MLO_ALLOW_FILE"
             grep -Eiq "^$mac([[:space:]]|$)" "$NON_MLO_ALLOW_FILE" || echo "$mac" >> "$NON_MLO_ALLOW_FILE"
-            echo "authorized as non-MLO: $mac" ;;
+            echo "authorized as non-MLO: $mac (EHT/Wi-Fi 7 clients remain protected)" ;;
   unallow)  mac=$(echo "$2" | tr 'A-F' 'a-f')
             [ -f "$NON_MLO_ALLOW_FILE" ] || { echo "not authorized: $mac"; exit 0; }
             awk -v m="$mac" 'tolower($1)!=m' "$NON_MLO_ALLOW_FILE" > "$NON_MLO_ALLOW_FILE.tmp" && mv "$NON_MLO_ALLOW_FILE.tmp" "$NON_MLO_ALLOW_FILE"
@@ -245,7 +246,8 @@ case "$1" in
             [ -f "$FLUSHFLAG" ] && ok "auto-flush on" || note "auto-flush off — audit-only mode (roamctl flush on)"
             MLO_SAFETY_MODE=strict; [ -f "$CONF" ] && . "$CONF"
             [ "$MLO_SAFETY_MODE" = "strict" ] && ok "MLO safety strict: MLO/unclassified clients cannot be flushed" || note "MLO safety mode is $MLO_SAFETY_MODE; strict is safest"
-            ok "authorized non-MLO list: $NON_MLO_ALLOW_FILE ($(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null) entries)"
+            cnt=0; [ -f "$NON_MLO_ALLOW_FILE" ] && cnt=$(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null)
+            ok "authorized non-MLO list: $NON_MLO_ALLOW_FILE (${cnt:-0} entries)"
             p=$(echo $(pids))
             [ -n "$p" ] && ok "poller running (pid $p)" || bad "poller NOT running"
             if events_enabled; then

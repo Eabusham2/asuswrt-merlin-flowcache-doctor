@@ -30,7 +30,7 @@ if [ "$1" = "uninstall" ]; then
   cru d "$CRU_ID" 2>/dev/null
   [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
   [ -f "$PROFILE" ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" "$PROFILE"
-  rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" "$DEST/roamctl" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
+  rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" "$DEST/roamctl" "$DEST/roam-nonmlo.allow" "$DEST/roam-mlo.ignore" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
   rm -rf /tmp/roam-detect
   echo "flowcache-doctor uninstalled."
   echo "(the 'roamctl' alias stays live in THIS shell until you log out)"
