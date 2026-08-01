@@ -188,6 +188,7 @@ fcd_util_snapshot() { # bsslist
 
 fcd_util_key() { printf '%s\n' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
+
 fcd_cleanup_incidents() {
   local _today _marker _d
   mkdir -p "$FCD_ROOT/incidents"
