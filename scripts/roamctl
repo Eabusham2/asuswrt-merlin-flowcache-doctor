@@ -1,8 +1,9 @@
 #!/bin/sh
-VERSION=1.0.0-mlo-safe-auto
+VERSION=1.0.3-mlo-safe-auto
 LIB=/jffs/scripts/fcd-lib.sh
 DAEMON=/jffs/scripts/fcd-daemon.sh
 EVENTS=/jffs/scripts/fcd-events.sh
+INCIDENT=/jffs/scripts/fcd-incident.sh
 CONF=/jffs/scripts/flowcache-doctor.conf
 STATE=/tmp/flowcache-doctor
 ROOT=/jffs/flowcache-doctor
@@ -22,7 +23,7 @@ start_all(){
 }
 stop_all(){ stop_one "$STATE/events.pid"; stop_one "$STATE/daemon.pid"; sleep 1; rm -rf "$STATE/daemon.lock" "$STATE/events.lock"; }
 
-case "$1" in
+case "${1:-}" in
   start|boot) start_all;;
   stop) stop_all;;
   restart) stop_all; start_all;;
@@ -39,7 +40,8 @@ case "$1" in
     echo "steering: ${FCD_STEER_MODE:-advisor} (never force-steers)"
     echo "non-MLO confirmations: ${FCD_CONFIRMATIONS:-5}"
     echo "unknown clients: MLO-safe fallback (never flushed)"
-    echo "utilization alerts: high ${FCD_UTIL_HIGH:-85}%, recover ${FCD_UTIL_RECOVER:-65}%, spike ${FCD_UTIL_SPIKE_DELTA:-25} points"
+    echo "utilization alerts: high ${FCD_UTIL_HIGH:-85}%, recover ${FCD_UTIL_RECOVER:-65}%, spike ${FCD_UTIL_SPIKE_DELTA:-20} points"
+    echo "incident capture: ${FCD_INCIDENT_CAPTURE:-1} (${FCD_INCIDENT_SAMPLES:-6} samples, ${FCD_INCIDENT_SAMPLE_INTERVAL:-2}s apart)"
     echo "log retention: ${FCD_LOG_RETENTION_DAYS:-30} days"
     _p=$(cat "$STATE/daemon.pid" 2>/dev/null); pid_alive "$_p" && echo "daemon: running (pid $_p)" || echo "daemon: stopped"
     _e=$(cat "$STATE/events.pid" 2>/dev/null); pid_alive "$_e" && echo "events: running (pid $_e)" || echo "events: stopped/unsupported"
@@ -49,12 +51,18 @@ case "$1" in
     ok(){ echo "  ok: $*"; }; bad(){ echo "  FAIL: $*"; _rc=1; }; warn(){ echo "  warn: $*"; }
     echo "flowcache-doctor $VERSION health"
     [ "$(nvram get jffs2_scripts)" = "1" ] && ok "JFFS scripts enabled" || bad "JFFS scripts disabled"
-    for _f in "$LIB" /jffs/scripts/fcd-platform-gtbe19000ai.sh "$DAEMON" "$EVENTS" /jffs/scripts/roamctl; do [ -x "$_f" ] && ok "executable $_f" || bad "missing/not executable $_f"; done
+    for _f in "$LIB" /jffs/scripts/fcd-platform-gtbe19000ai.sh "$DAEMON" "$EVENTS" "$INCIDENT" /jffs/scripts/roamctl; do
+      [ -x "$_f" ] && ok "executable $_f" || bad "missing/not executable $_f"
+    done
     which fcctl >/dev/null 2>&1 && ok "fcctl available" || bad "fcctl unavailable"
     [ -f "$CONF" ] && sh -n "$CONF" >/dev/null 2>&1 && ok "config parses" || bad "config missing or invalid"
     _b=$(fcd_resolve_bsslist); [ -n "$_b" ] && ok "BSS interfaces: $_b" || bad "no roamable BSS interfaces"
     _p=$(cat "$STATE/daemon.pid" 2>/dev/null); pid_alive "$_p" && ok "daemon running" || bad "daemon not running"
-    [ "${FCD_EVENT_HEAL:-1}" != "1" ] && warn "event listener disabled" || { [ ! -f /jffs/wifi_wlc.log ] && warn "firmware event log unavailable; poller still works" || { _e=$(cat "$STATE/events.pid" 2>/dev/null); pid_alive "$_e" && ok "event listener running" || bad "event listener not running"; }; }
+    [ "${FCD_EVENT_HEAL:-1}" != "1" ] && warn "event listener disabled" || {
+      [ ! -f /jffs/wifi_wlc.log ] && warn "firmware event log unavailable; poller still works" || {
+        _e=$(cat "$STATE/events.pid" 2>/dev/null); pid_alive "$_e" && ok "event listener running" || bad "event listener not running"
+      }
+    }
     grep -q 'flowcache-doctor-watchdog' /jffs/scripts/services-start 2>/dev/null && ok "boot/watchdog hook installed" || bad "boot/watchdog hook missing"
     cru l 2>/dev/null | grep -q flowcache-doctor-watchdog && ok "cron watchdog armed" || bad "cron watchdog missing"
     [ "$_rc" -eq 0 ] && echo healthy || echo "problems found"
@@ -62,12 +70,16 @@ case "$1" in
     ;;
   clients)
     BSSLIST=$(fcd_resolve_bsslist); MAP="$STATE/.clients.$$"; MLO="$STATE/.mlo.clients.$$"; mkdir -p "$STATE"; : > "$MAP"; : > "$MLO"
-    for _b in $BSSLIST; do wl -i "$_b" assoclist 2>/dev/null | awk -v b="$_b" '{if($2!="") print tolower($2),b}' >> "$MAP"; { wl -i "$_b" mlo 2>/dev/null; wl -i "$_b" mlo_status 2>/dev/null; } >> "$MLO"; done
+    for _b in $BSSLIST; do
+      wl -i "$_b" assoclist 2>/dev/null | awk -v b="$_b" '{if($2!="") print tolower($2),b}' >> "$MAP"
+      { wl -i "$_b" mlo 2>/dev/null; wl -i "$_b" mlo_status 2>/dev/null; } >> "$MLO"
+    done
     FCD_ASSOC_MAP="$MAP"; FCD_MLO_SNAPSHOT="$MLO"; export FCD_ASSOC_MAP FCD_MLO_SNAPSHOT
     printf '%-18s %-22s %-28s %-10s %s\n' MAC RADIOS CLASSIFICATION OBSERVED CONFIRMED
     for _m in $(awk '{print $1}' "$MAP" | sort -u); do
       _r=$(awk -v m="$_m" '$1==m{printf "%s%s",s,$2;s=","}' "$MAP"); _b=$(awk -v m="$_m" '$1==m{print $2;exit}' "$MAP")
-      _c=$(fcd_classify "$_m" "$_b" "$BSSLIST"); _prog=$(fcd_confirmation_progress "$_m"); fcd_confirmed_nonmlo "$_m" "$_b" && _yes=yes || _yes=no
+      _c=$(fcd_classify "$_m" "$_b" "$BSSLIST"); _prog=$(fcd_confirmation_progress "$_m")
+      fcd_confirmed_nonmlo "$_m" "$_b" && _yes=yes || _yes=no
       printf '%-18s %-22s %-28s %-10s %s\n' "$_m" "$_r" "$_c" "$_prog" "$_yes"
     done
     rm -f "$MAP" "$MLO"
@@ -86,15 +98,48 @@ case "$1" in
     ;;
   util)
     BSSLIST=$(fcd_resolve_bsslist)
-    printf '%-12s %-8s %s\n' BSS BUSY STATE
+    printf '%-12s %-8s %-12s %s\n' BSS BUSY STATE CAUSE
     for _b in $BSSLIST; do
-      _u=$(fcd_radio_util "$_b"); _key=$(fcd_util_key "$_b"); _state=unknown
+      _fields=$(fcd_chanim_fields "$_b"); _u=$(fcd_kv "$_fields" busy); _cause=$(fcd_chanim_cause_from_fields "$_fields")
+      _key=$(fcd_util_key "$_b"); _state=unknown
       [ -f "$STATE/util/$_key" ] && IFS='|' read -r _last _state _lastlog < "$STATE/util/$_key"
-      printf '%-12s %-8s %s\n' "$_b" "${_u}%" "$_state"
+      printf '%-12s %-8s %-12s %s\n' "$_b" "${_u:-?}%" "$_state" "$_cause"
     done
     ;;
+  capture)
+    shift
+    _reason=${*:-manual}
+    "$INCIDENT" "MANUAL-$_reason" all ? ?
+    _latest=$(find "$ROOT/incidents" -type f -name summary.txt 2>/dev/null | sort -r | head -n 1)
+    [ -n "$_latest" ] && { echo "Captured: $_latest"; cat "$_latest"; }
+    ;;
+  incidents)
+    find "$ROOT/incidents" -type f -name summary.txt 2>/dev/null | sort -r | head -n "${2:-20}" |
+    while IFS= read -r _s; do
+      _d=$(dirname "$_s")
+      _event=$(awk -F': ' '/^event:/{print $2;exit}' "$_s")
+      _class=$(awk -F': ' '/^classification:/{print $2;exit}' "$_s")
+      printf '%s  %-14s %s\n' "$(basename "$_d")" "${_event:-?}" "${_class:-?}"
+    done
+    ;;
+  incident)
+    _arg=${2:-latest}
+    if [ "$_arg" = latest ]; then
+      _s=$(find "$ROOT/incidents" -type f -name summary.txt 2>/dev/null | sort -r | head -n 1)
+    else
+      case "$_arg" in ''|*[!A-Za-z0-9._-]*) echo "invalid incident name"; exit 1;; esac
+      _s="$ROOT/incidents/$_arg/summary.txt"
+    fi
+    [ -f "$_s" ] || { echo "incident not found"; exit 1; }
+    cat "$_s"
+    ;;
   log) cat "$FCD_LOG_DIR"/events-*.log 2>/dev/null | tail -n "${2:-100}";;
-  cleanup) rm -f "$STATE"/cleanup.*; fcd_cleanup_logs; echo cleaned;;
+  cleanup)
+    rm -f "$STATE"/cleanup.* "$STATE"/incident-cleanup.*
+    fcd_cleanup_logs
+    command -v fcd_cleanup_incidents >/dev/null 2>&1 && fcd_cleanup_incidents
+    echo cleaned
+    ;;
   update)
     _tmp=/tmp/fcd-install.$$
     curl -fsSL "$REPO_RAW/install.sh?cb=$(date +%s)" -o "$_tmp" || exit 1
@@ -102,5 +147,5 @@ case "$1" in
     exec sh "$_tmp"
     ;;
   uninstall) exec sh /jffs/scripts/flowcache-doctor-uninstall.sh;;
-  *) echo "usage: roamctl start|stop|restart|status|health|clients|advise|util|log [lines]|cleanup|update|enable|disable|uninstall"; exit 1;;
+  *) echo "usage: roamctl start|stop|restart|status|health|clients|advise|util|capture [reason]|incidents [count]|incident [latest|name]|log [lines]|cleanup|update|enable|disable|uninstall"; exit 1;;
 esac
