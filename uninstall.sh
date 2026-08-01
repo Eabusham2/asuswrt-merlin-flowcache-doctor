@@ -6,9 +6,9 @@ PROFILE=/jffs/configs/profile.add
 cru d flowcache-doctor-watchdog 2>/dev/null
 [ -f "$SS" ] && sed -i '/roamctl boot/d; /flowcache-doctor-watchdog/d' "$SS"
 [ -f "$PROFILE" ] && sed -i '/alias roamctl=.*flowcache-doctor/d' "$PROFILE"
-rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-daemon.sh" "$DEST/fcd-events.sh" "$DEST/roamctl" \
-  "$DEST/flowcache-doctor.conf" "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
+rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
+  "$DEST/fcd-events.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
+  "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
 rm -rf /tmp/flowcache-doctor
-# Keep /jffs/flowcache-doctor/backups; remove only this add-on's generated logs.
 rm -rf /jffs/flowcache-doctor/log
 echo "flowcache-doctor removed; backups remain under /jffs/flowcache-doctor/"
