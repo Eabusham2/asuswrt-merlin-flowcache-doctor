@@ -1,6 +1,6 @@
 #!/bin/sh
 # Enforce the user-facing AirIQ setting without touching Wi-Fi, MLO, channels, or flow cache.
-# Only an explicit global airiq_enable=0 authorizes stopping AirIQ processes.
+# Explicit global airiq_enable=0 stops AirIQ. Explicit airiq_enable=1 ensures its monitor is running.
 
 set -u
 LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
@@ -9,6 +9,7 @@ LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
 STATE=${FCD_STATE:-/tmp/flowcache-doctor}
 INTERVAL=${FCD_AIRIQ_GUARD_INTERVAL:-10}
 KILL_GRACE=${FCD_AIRIQ_KILL_GRACE:-2}
+START_GRACE=${FCD_AIRIQ_START_GRACE:-4}
 PIDFILE="$STATE/airiq-guard.pid"
 LOCK="$STATE/airiq-guard.lock"
 
@@ -23,6 +24,7 @@ log_msg() {
 num_ok() { case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 num_ok "$INTERVAL" || INTERVAL=10
 num_ok "$KILL_GRACE" || KILL_GRACE=2
+num_ok "$START_GRACE" || START_GRACE=4
 [ "$INTERVAL" -ge 5 ] || INTERVAL=5
 
 list_airiq_pids() {
@@ -30,6 +32,14 @@ list_airiq_pids() {
     pidof "$_name" 2>/dev/null
   done | tr ' ' '\n' | awk '/^[0-9]+$/' | sort -u
 }
+
+list_guard_pids() {
+  ps w 2>/dev/null | awk '
+    $1 ~ /^[0-9]+$/ && $0 ~ /\/jffs\/scripts\/fcd-airiq-guard[.]sh daemon/ {print $1}
+  ' | sort -n -u
+}
+
+pid_alive() { [ -n "${1:-}" ] && [ -d "/proc/$1" ]; }
 
 process_details() {
   _out=
@@ -71,7 +81,6 @@ stop_airiq() {
   [ "$_before" != none ] || return 0
   log_msg AIRIQ-GUARD "global=0 action=stop before=$_before"
 
-  # Stop supervisors before workers so they cannot immediately respawn them.
   killall airiq_monitor 2>/dev/null
   killall airiq_service 2>/dev/null
   killall airiq_app 2>/dev/null
@@ -91,6 +100,27 @@ stop_airiq() {
   fi
 }
 
+ensure_airiq_started() {
+  _monitor=$(pidof airiq_monitor 2>/dev/null)
+  if [ -z "$_monitor" ]; then
+    _bin=$(which airiq_monitor 2>/dev/null)
+    if [ -z "$_bin" ] || [ ! -x "$_bin" ]; then
+      log_msg AIRIQ-START-FAIL "global=1 airiq_monitor-unavailable"
+      return 0
+    fi
+    log_msg AIRIQ-START "global=1 action=start-monitor binary=$_bin"
+    "$_bin" >/dev/null 2>&1 &
+    sleep "$START_GRACE"
+  fi
+
+  _after=$(process_details)
+  if [ "$_after" = none ]; then
+    log_msg AIRIQ-START-FAIL "global=1 no-airiq-processes-after-start"
+  else
+    log_msg AIRIQ-ON "global=1 processes=$_after"
+  fi
+}
+
 check_once() {
   _global=$(nvram get airiq_enable 2>/dev/null)
   case "$_global" in
@@ -99,10 +129,9 @@ check_once() {
       stop_airiq
       ;;
     1)
-      # AirIQ is explicitly enabled by the user; never interfere.
+      ensure_airiq_started
       ;;
     *)
-      # Missing or unfamiliar setting: fail open and leave services untouched.
       _marker="$STATE/airiq-unknown.warned"
       if [ ! -f "$_marker" ]; then
         mkdir -p "$STATE"
@@ -113,7 +142,43 @@ check_once() {
   esac
 }
 
-pid_alive() { [ -n "${1:-}" ] && [ -d "/proc/$1" ]; }
+stop_guard_daemons() {
+  _pids=$(list_guard_pids)
+  for _pid in $_pids; do
+    [ "$_pid" = "$$" ] && continue
+    kill "$_pid" 2>/dev/null
+  done
+  sleep 2
+  _pids=$(list_guard_pids)
+  for _pid in $_pids; do
+    [ "$_pid" = "$$" ] && continue
+    kill -9 "$_pid" 2>/dev/null
+  done
+  rm -f "$PIDFILE"
+  rm -rf "$LOCK" 2>/dev/null
+}
+
+start_guard() {
+  mkdir -p "$STATE"
+  _pids=$(list_guard_pids)
+  _count=$(printf '%s\n' "$_pids" | awk 'NF{n++} END{print n+0}')
+  if [ "$_count" -gt 0 ]; then
+    _keep=$(printf '%s\n' "$_pids" | awk 'NF{print; exit}')
+    printf '%s\n' "$_keep" > "$PIDFILE"
+    if [ "$_count" -gt 1 ]; then
+      for _pid in $_pids; do
+        [ "$_pid" = "$_keep" ] && continue
+        kill "$_pid" 2>/dev/null
+        sleep 1
+        pid_alive "$_pid" && kill -9 "$_pid" 2>/dev/null
+      done
+      log_msg AIRIQ-GUARD-DEDUP "kept=$_keep removed=$((_count - 1))"
+    fi
+    return 0
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  "$0" daemon >/dev/null 2>&1 &
+}
 
 case "${1:-daemon}" in
   once)
@@ -121,26 +186,19 @@ case "${1:-daemon}" in
     exit 0
     ;;
   start)
-    mkdir -p "$STATE"
-    _pid=$(cat "$PIDFILE" 2>/dev/null)
-    if pid_alive "$_pid"; then
-      exit 0
-    fi
-    "$0" daemon >/dev/null 2>&1 &
+    start_guard
     exit 0
     ;;
   stop)
-    _pid=$(cat "$PIDFILE" 2>/dev/null)
-    pid_alive "$_pid" && kill "$_pid" 2>/dev/null
-    rm -f "$PIDFILE"
-    sleep 1
-    rm -rf "$LOCK" 2>/dev/null
+    stop_guard_daemons
     exit 0
     ;;
   status)
     _global=$(nvram get airiq_enable 2>/dev/null)
-    _pid=$(cat "$PIDFILE" 2>/dev/null)
-    echo "AirIQ guard: $(pid_alive "$_pid" && echo running || echo stopped)${_pid:+ (pid $_pid)}"
+    _gpids=$(list_guard_pids)
+    _gcount=$(printf '%s\n' "$_gpids" | awk 'NF{n++} END{print n+0}')
+    echo "AirIQ guard: $([ "$_gcount" -gt 0 ] && echo running || echo stopped)${_gpids:+ (pids $(printf '%s' "$_gpids" | tr '\n' ',' | sed 's/,$//'))}"
+    echo "guard instances: $_gcount"
     echo "global airiq_enable: ${_global:-missing}"
     echo "indexed flags: $(for _v in '0:airiq_enable' '1:airiq_enable' '2:airiq_enable' '3:airiq_enable'; do _x=$(nvram get "$_v" 2>/dev/null); [ -n "$_x" ] && printf '%s=%s ' "$_v" "$_x"; done)"
     echo "AirIQ processes: $(process_details)"
@@ -158,8 +216,9 @@ if ! mkdir "$LOCK" 2>/dev/null; then
   mkdir "$LOCK" 2>/dev/null || exit 1
 fi
 printf '%s\n' $$ > "$PIDFILE"
-cleanup(){ rm -f "$PIDFILE"; rmdir "$LOCK" 2>/dev/null; }
-trap cleanup EXIT INT TERM
+cleanup() { rm -f "$PIDFILE"; rmdir "$LOCK" 2>/dev/null; }
+trap cleanup EXIT
+trap 'cleanup; exit 0' INT TERM HUP
 log_msg START "airiq-guard pid=$$ interval=${INTERVAL}s"
 
 while :; do
