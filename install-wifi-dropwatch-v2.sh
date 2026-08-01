@@ -26,7 +26,9 @@ chmod 755 "$WATCH" "$HEALTH" || fail "cannot make scripts executable"
 
 [ -f "$SS" ] || { printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; }
 # Rebuild only our three managed startup lines, preserving every unrelated hook.
-sed -i '\|/jffs/scripts/roamctl boot|d;\|fcd-airiq-guard.sh start|d;\|fcd-wifi-dropwatch.sh start|d' "$SS"
+sed -i '/\/jffs\/scripts\/roamctl boot/d' "$SS"
+sed -i '/fcd-airiq-guard.sh start/d' "$SS"
+sed -i '/fcd-wifi-dropwatch.sh start/d' "$SS"
 printf '%s\n' '/jffs/scripts/roamctl boot' >> "$SS"
 printf '%s\n' '/jffs/scripts/fcd-airiq-guard.sh start # fcd-airiq-guard' >> "$SS"
 printf '%s\n' '/jffs/scripts/fcd-wifi-dropwatch.sh start # fcd-wifi-dropwatch' >> "$SS"
