@@ -9,13 +9,14 @@ BACKUP=/jffs/flowcache-doctor/airiq-guard-backup-$(date '+%Y%m%d-%H%M%S')
 
 fail(){ echo "ERROR: $*" >&2; rm -rf "$TMP"; exit 1; }
 [ "$(nvram get jffs2_scripts 2>/dev/null)" = 1 ] || fail "Enable JFFS custom scripts first"
-command -v curl >/dev/null 2>&1 || fail "curl is unavailable"
+CURL=$(which curl 2>/dev/null)
+[ -n "$CURL" ] && [ -x "$CURL" ] || fail "curl is unavailable"
 mkdir -p "$TMP" "$DEST" "$BACKUP" || fail "cannot create install directories"
 
 [ -e "$GUARD" ] && cp -p "$GUARD" "$BACKUP/fcd-airiq-guard.sh"
 [ -e "$SS" ] && cp -p "$SS" "$BACKUP/services-start"
 
-curl -fsSL "$REPO_RAW/scripts/fcd-airiq-guard.sh?cb=$(date +%s)" -o "$TMP/fcd-airiq-guard.sh" || fail "download failed"
+"$CURL" -fsSL "$REPO_RAW/scripts/fcd-airiq-guard.sh?cb=$(date +%s)" -o "$TMP/fcd-airiq-guard.sh" || fail "download failed"
 sh -n "$TMP/fcd-airiq-guard.sh" || fail "syntax check failed"
 
 [ -x "$GUARD" ] && "$GUARD" stop >/dev/null 2>&1
