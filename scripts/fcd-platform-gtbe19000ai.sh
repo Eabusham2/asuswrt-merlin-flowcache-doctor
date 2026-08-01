@@ -4,7 +4,7 @@
 
 FCD_UTIL_HIGH=${FCD_UTIL_HIGH:-85}
 FCD_UTIL_RECOVER=${FCD_UTIL_RECOVER:-65}
-FCD_UTIL_SPIKE_DELTA=${FCD_UTIL_SPIKE_DELTA:-25}
+FCD_UTIL_SPIKE_DELTA=${FCD_UTIL_SPIKE_DELTA:-20}
 FCD_UTIL_LOG_COOLDOWN=${FCD_UTIL_LOG_COOLDOWN:-60}
 
 fcd_classify() { # mac current_bss bsslist
@@ -126,10 +126,12 @@ fcd_client_rates() {
 }
 
 fcd_util_snapshot() { # bsslist
-  local _b _u _out
+  local _b _u _out _key _f _state _lastlog
   _out=
   for _b in $1; do
-    _u=$(fcd_radio_util "$_b")
+    _key=$(fcd_util_key "$_b"); _f="$FCD_STATE/util/$_key"; _u=
+    [ -f "$_f" ] && IFS='|' read -r _u _state _lastlog < "$_f"
+    fcd_num "$_u" || _u=$(fcd_radio_util "$_b")
     [ -n "$_out" ] && _out="$_out,"
     _out="${_out}${_b}=${_u}%"
   done
