@@ -25,7 +25,11 @@ process_events() {
   while IFS='|' read -r _ts _type _mac _bss; do
     fcd_num "$_ts" || continue
     fcd_valid_mac "$_mac" || continue
-    case "$_type" in assoc|reassoc|deauth|disassoc) fcd_record_pending "$_mac" "$_bss" "event-$_type";; esac
+    case "$_type" in
+      assoc|reassoc|deauth|disassoc)
+        fcd_record_pending "$_mac" "$_bss" "event-$_type util=${UTILS:-unknown}"
+        ;;
+    esac
   done < "$_w"
   rm -f "$_w"
 }
@@ -58,7 +62,7 @@ process_settle() {
     fcd_valid_mac "$_mac" || { rm -f "$_f"; continue; }
     fcd_num "$_due" || { rm -f "$_f"; continue; }
     [ "$_now" -ge "$_due" ] || continue
-    fcd_safe_flush "$_mac" "$_bss" "$BSSLIST" "$_reason"
+    fcd_safe_flush "$_mac" "$_bss" "$BSSLIST" "$_reason current-util=${UTILS:-unknown}"
     _rc=$?
     case "$_rc" in
       2|4) _new=$((_now + FCD_INTERVAL)); printf '%s|%s|%s|%s\n' "$_mac" "$_bss" "$_new" "$_reason" > "$_f";;
@@ -76,6 +80,11 @@ while :; do
     continue
   fi
   rm -f "$FCD_STATE/no-bss.warned"
+
+  # Watch the old symptom where channel utilization jumps during a drop.
+  # This is observational only: it never steers, restarts, or flushes a radio.
+  for _b in $BSSLIST; do fcd_observe_radio_util "$_b"; done
+  UTILS=$(fcd_util_snapshot "$BSSLIST")
 
   MAP="$FCD_STATE/.map.$$"; MLO="$FCD_STATE/mlo.snapshot"; MLOTS="$FCD_STATE/mlo.snapshot.ts"
   : > "$MAP"
@@ -106,8 +115,8 @@ while :; do
     fi
 
     if [ -n "$_prevb" ] && [ "$_prevb" != "$_bss" ] && [ "$_prevstatus" != "MULTI" ]; then
-      fcd_log ROAM "mac=$_mac $_prevb->$_bss class=$_class"
-      fcd_record_pending "$_mac" "$_bss" "roam-$_prevb-to-$_bss"
+      fcd_log ROAM "mac=$_mac $_prevb->$_bss class=$_class util=$UTILS"
+      fcd_record_pending "$_mac" "$_bss" "roam-$_prevb-to-$_bss util=$UTILS"
     fi
 
     _bp=$(fcd_port_of "$_bss" 2>/dev/null)
@@ -116,8 +125,8 @@ while :; do
     if [ -n "$_bp" ] && [ -n "$_fp" ] && [ "$_bp" != "$_fp" ]; then
       if [ "$_prevstatus" = "STALE1" ] && [ "$_prevport" = "$_fp" ]; then
         _status=STALE2
-        fcd_log STALE "mac=$_mac assoc=$_bss assoc-port=$_bp fdb-port=$_fp class=$_class"
-        fcd_record_pending "$_mac" "$_bss" "stale-fdb-port-$_fp"
+        fcd_log STALE "mac=$_mac assoc=$_bss assoc-port=$_bp fdb-port=$_fp class=$_class util=$UTILS"
+        fcd_record_pending "$_mac" "$_bss" "stale-fdb-port-$_fp util=$UTILS"
       else
         _status=STALE1
       fi
