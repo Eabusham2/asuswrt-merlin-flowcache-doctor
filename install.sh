@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.1-mlo-safe-auto
+VERSION=1.0.2-mlo-safe-auto
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -30,8 +30,8 @@ rollback(){
   [ -x "$DEST/roamctl" ] && "$DEST/roamctl" start >/dev/null 2>&1
   [ -f "$SS" ] && grep 'cru a roam-detect-wd' "$SS" 2>/dev/null | sh >/dev/null 2>&1
 }
-
 fail(){ echo "ERROR: $*" >&2; rollback; rm -rf "$TMP"; exit 1; }
+
 [ -d /jffs ] || fail "/jffs is unavailable"
 [ "$(nvram get jffs2_scripts)" = "1" ] || fail "Enable JFFS custom scripts first"
 which curl >/dev/null 2>&1 || fail "curl is unavailable"
@@ -52,7 +52,7 @@ for f in $FILES; do
   sh -n "$TMP/$f" || fail "syntax check failed: $f"
 done
 
-# Make the platform parser part of every runtime source of fcd-lib.sh.
+# Make the model parser part of every process that sources fcd-lib.sh.
 printf '\n%s\n' '[ -r /jffs/scripts/fcd-platform-gtbe19000ai.sh ] && . /jffs/scripts/fcd-platform-gtbe19000ai.sh' >> "$TMP/fcd-lib.sh"
 sh -n "$TMP/fcd-lib.sh" || fail "combined library syntax check failed"
 sed -i "s/^VERSION=.*/VERSION=$VERSION/" "$TMP/roamctl"
@@ -62,7 +62,7 @@ curl -fsSL "$REPO_RAW/uninstall.sh?cb=$(date +%s)" -o "$TMP/uninstall.sh" || fai
 sh -n "$TMP/uninstall.sh" || fail "syntax check failed: uninstall.sh"
 
 cat > "$TMP/flowcache-doctor.conf" <<'EOFCONF'
-# Automatic fail-closed safety: active EHT/11be, MLO, and unknown clients are never flushed.
+# Automatic fail-closed safety: EHT/11be, MLO, fallback-unknown, and uncertain clients are never flushed.
 FCD_INTERVAL=2
 FCD_CONFIRMATIONS=5
 FCD_CONFIRM_MAX_AGE=8
@@ -76,6 +76,11 @@ FCD_LOG_RETENTION_DAYS=30
 FCD_STEER_MODE=advisor
 FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
+# Passive congestion correlation only; these settings never steer or restart Wi-Fi.
+FCD_UTIL_HIGH=85
+FCD_UTIL_RECOVER=65
+FCD_UTIL_SPIKE_DELTA=25
+FCD_UTIL_LOG_COOLDOWN=60
 EOFCONF
 sh -n "$TMP/flowcache-doctor.conf" || fail "default config invalid"
 
