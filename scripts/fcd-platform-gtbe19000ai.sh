@@ -4,8 +4,9 @@
 
 FCD_UTIL_HIGH=${FCD_UTIL_HIGH:-85}
 FCD_UTIL_RECOVER=${FCD_UTIL_RECOVER:-65}
-FCD_UTIL_SPIKE_DELTA=${FCD_UTIL_SPIKE_DELTA:-25}
+FCD_UTIL_SPIKE_DELTA=${FCD_UTIL_SPIKE_DELTA:-20}
 FCD_UTIL_LOG_COOLDOWN=${FCD_UTIL_LOG_COOLDOWN:-60}
+FCD_INCIDENT_CAPTURE=${FCD_INCIDENT_CAPTURE:-1}
 
 fcd_classify() { # mac current_bss bsslist
   local _m _bss _bsslist _ac _si _ms _k _eml
@@ -114,6 +115,53 @@ fcd_radio_util() { # bss, best-effort 0-100 or ?
   [ -n "$_u" ] && printf '%s\n' "$_u" || printf '?\n'
 }
 
+fcd_chanim_fields() { # bss
+  wl -i "$1" chanim_stats 2>/dev/null | awk '
+    $1=="chspec" {
+      for(i=1;i<=NF;i++) p[$i]=i
+      next
+    }
+    p["busy"] && $1!="version:" && NF>=p["busy"] {
+      printf "chspec=%s tx=%s inbss=%s obss=%s nocat=%s nopkt=%s doze=%s txop=%s goodtx=%s badtx=%s glitch=%s badplcp=%s knoise=%s idle=%s busy=%s timestamp=%s\n",
+        $(p["chspec"]),$(p["tx"]),$(p["inbss"]),$(p["obss"]),$(p["nocat"]),$(p["nopkt"]),
+        $(p["doze"]),$(p["txop"]),$(p["goodtx"]),$(p["badtx"]),$(p["glitch"]),
+        $(p["badplcp"]),$(p["knoise"]),$(p["idle"]),$(p["busy"]),$(p["timestamps"])
+      exit
+    }'
+}
+
+fcd_kv() { # "key=value ..." key
+  printf '%s\n' "$1" | tr ' ' '\n' | awk -F= -v k="$2" '$1==k{print $2; exit}'
+}
+
+fcd_chanim_cause_from_fields() { # fields
+  local _f _busy _tx _in _ob _no _np _good _bad _foreign _local _explained
+  _f=$1
+  _busy=$(fcd_kv "$_f" busy); _tx=$(fcd_kv "$_f" tx); _in=$(fcd_kv "$_f" inbss)
+  _ob=$(fcd_kv "$_f" obss); _no=$(fcd_kv "$_f" nocat); _np=$(fcd_kv "$_f" nopkt)
+  _good=$(fcd_kv "$_f" goodtx); _bad=$(fcd_kv "$_f" badtx)
+  for _v in "$_busy" "$_tx" "$_in" "$_ob" "$_no" "$_np" "$_good" "$_bad"; do
+    fcd_num "$_v" || { printf '%s\n' unknown-telemetry; return; }
+  done
+  _foreign=$((_no + _np))
+  _local=$((_tx + _in))
+  _explained=$((_tx + _in + _ob + _no + _np))
+
+  if [ "$_busy" -ge "$FCD_UTIL_HIGH" ] && [ "$_explained" -lt 25 ]; then
+    printf '%s\n' driver-or-counter-anomaly
+  elif [ "$_ob" -ge 25 ] && [ "$_ob" -ge "$_foreign" ] && [ "$_ob" -ge "$_in" ]; then
+    printf '%s\n' other-wifi-contention
+  elif [ "$_foreign" -ge 25 ] && [ "$_foreign" -ge "$_ob" ]; then
+    printf '%s\n' nonwifi-or-undecodable-energy
+  elif [ "$_local" -ge 35 ] || { [ "$_bad" -ge 10 ] && [ "$_bad" -gt "$_good" ]; }; then
+    printf '%s\n' local-airtime-or-retries
+  elif [ "$_busy" -ge "$FCD_UTIL_HIGH" ]; then
+    printf '%s\n' mixed-high-airtime
+  else
+    printf '%s\n' mixed-or-transient
+  fi
+}
+
 fcd_client_rates() {
   wl -i "$1" sta_info "$2" 2>/dev/null | awk '
     /rate of last tx pkt:/ && !tx {for(i=1;i<NF;i++) if($i ~ /^[0-9]+$/ && $(i+1)=="kbps"){tx=$i; break}}
@@ -140,8 +188,29 @@ fcd_util_snapshot() { # bsslist
 
 fcd_util_key() { printf '%s\n' "$1" | tr -c 'A-Za-z0-9._-' '_'; }
 
+fcd_cleanup_incidents() {
+  local _today _marker _d
+  mkdir -p "$FCD_ROOT/incidents"
+  _today=$(date '+%Y%m%d')
+  _marker="$FCD_STATE/incident-cleanup.$_today"
+  [ -f "$_marker" ] && return 0
+  rm -f "$FCD_STATE"/incident-cleanup.* 2>/dev/null
+  : > "$_marker"
+  find "$FCD_ROOT/incidents" -type d -mtime +"$FCD_LOG_RETENTION_DAYS" 2>/dev/null |
+  while IFS= read -r _d; do
+    [ "$_d" = "$FCD_ROOT/incidents" ] && continue
+    case "$_d" in "$FCD_ROOT"/incidents/*) rm -rf "$_d";; esac
+  done
+}
+
+fcd_trigger_incident() { # event bss previous current
+  [ "$FCD_INCIDENT_CAPTURE" = "1" ] || return 0
+  [ -x /jffs/scripts/fcd-incident.sh ] || return 0
+  /jffs/scripts/fcd-incident.sh "$1" "$2" "$3" "$4" >/dev/null 2>&1 &
+}
+
 fcd_observe_radio_util() { # bss
-  local _b _u _key _f _now _prev _state _lastlog _delta _abs _event _newstate
+  local _b _u _key _f _now _prev _state _lastlog _delta _abs _event _newstate _fields _cause
   _b=$1
   _u=$(fcd_radio_util "$_b")
   fcd_num "$_u" || return 0
@@ -168,8 +237,11 @@ fcd_observe_radio_util() { # bss
   fi
 
   if [ -n "$_event" ]; then
-    fcd_log "$_event" "bss=$_b previous=${_prev:-?}% current=${_u}%"
+    _fields=$(fcd_chanim_fields "$_b")
+    _cause=$(fcd_chanim_cause_from_fields "$_fields")
+    fcd_log "$_event" "bss=$_b previous=${_prev:-?}% current=${_u}% cause=$_cause $_fields"
     _lastlog=$_now
+    case "$_event" in UTIL-HIGH|UTIL-SPIKE) fcd_trigger_incident "$_event" "$_b" "${_prev:-?}" "$_u";; esac
   fi
   printf '%s|%s|%s\n' "$_u" "$_newstate" "$_lastlog" > "$_f.tmp" && mv "$_f.tmp" "$_f"
 }
