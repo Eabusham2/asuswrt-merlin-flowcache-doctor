@@ -1,3 +1,40 @@
+# MLO-safe fork notice
+
+This fork adds a **fail-closed three-link MLO safety gate**. The upstream
+0.3.2 detector assumes one station MAC belongs to one radio and can interpret
+normal MLO link activity as a roam. In this fork, automatic healing defaults to
+`MLO_SAFETY_MODE="strict"`:
+
+- positively detected MLO clients are never flushed;
+- clients whose MLO status is uncertain are never flushed;
+- only MAC addresses explicitly authorized with `roamctl allow <MAC>` are
+  treated as non-MLO and eligible for per-client healing;
+- an explicit MLO ignore list always overrides the non-MLO allowlist;
+- three simultaneous links are supported by the safety detector; same-MAC
+  three-radio membership and MLD/link tables are treated as MLO evidence.
+
+Useful commands after installing this fork:
+
+```sh
+roamctl clients
+roamctl allow aa:bb:cc:dd:ee:ff     # known non-MLO client only
+roamctl unallow aa:bb:cc:dd:ee:ff
+roamctl ignore aa:bb:cc:dd:ee:ff    # force permanent MLO protection
+```
+
+Install this fork with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
+```
+
+The strict allowlist, rather than undocumented Broadcom CLI output, is the
+safety boundary. Auto classification is available but is intentionally not the
+default because absence of an MLO marker is not proof that a Wi-Fi 7 client is
+single-link.
+
+---
+
 # asuswrt-merlin-flowcache-doctor
 
 > **Not a technical person?** No problem — skip ahead to

@@ -29,7 +29,14 @@ STATE=/tmp/roam-detect
 FLUSHFLAG=/jffs/scripts/roam-detect.flush    # exists => auto-flush on (roamctl flush on|off)
 CONF=/jffs/scripts/roam-detect.conf
 LIB=/jffs/scripts/roam-lib.sh
+MLOLIB=/jffs/scripts/roam-mlo.sh
 [ -f "$CONF" ] && . "$CONF"
+if [ -f "$MLOLIB" ]; then
+  . "$MLOLIB"
+else
+  logger -t "$TAG" "MLO safety library missing — fail-closed; no client will be flushed"
+  mlo_heal_allowed() { return 1; }
+fi
 
 # BSSLIST=auto: resolve the SSID-carrying interfaces now and record the
 # result as the fingerprint the watchdog's drift check compares against.
@@ -60,6 +67,7 @@ want() { case " $HEAL_TRIGGERS " in *" $1 "*) return 0;; *) return 1;; esac; }
 # while repeat flushes on the same radio are rate-limited. MIN_GAP is a hard
 # floor so rapid back-and-forth flapping can't turn the bypass into a storm.
 heal() { # $1 = mac, $2 = reason, $3 = current bss, $4 = "force" bypasses same-radio cooldown
+  mlo_heal_allowed "$1" "$3" "$BSSLIST" "$2" || return 0
   now=$(date +%s)
   key=$(echo "$1" | tr -d :)
   lf="$STATE/$key.lastflush"; lb="$STATE/$key.lastflushbss"
@@ -100,7 +108,11 @@ while true; do
     done
   done
 
-  # Pass 2: per-client state machine
+  # Pass 2: per-client state machine. Expose this pass' association map
+  # to the MLO safety gate so three-link/same-MAC membership is detected
+  # without another radio query.
+  RD_ASSOC_MAP="$MAP"
+  export RD_ASSOC_MAP
   for mac in $(awk '{print $1}' "$MAP" | sort -u); do
     f="$STATE/$(echo "$mac" | tr -d :)"
     prev_bss=""; prev_status=""

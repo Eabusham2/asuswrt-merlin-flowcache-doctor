@@ -25,7 +25,14 @@ STATE=/tmp/roam-detect
 FLUSHFLAG=/jffs/scripts/roam-detect.flush
 CONF=/jffs/scripts/roam-detect.conf
 LIB=/jffs/scripts/roam-lib.sh
+MLOLIB=/jffs/scripts/roam-mlo.sh
 [ -f "$CONF" ] && . "$CONF"
+if [ -f "$MLOLIB" ]; then
+  . "$MLOLIB"
+else
+  logger -t "$TAG" "MLO safety library missing — fail-closed; no client will be flushed"
+  mlo_heal_allowed() { return 1; }
+fi
 
 # BSSLIST=auto: resolve for our own use (deauth-branch radio lookups). The
 # poller owns the fingerprint file — we only resolve, never write it.
@@ -56,6 +63,7 @@ logger -t "$TAG" "starting (pid $$, source: $EVLOG)"
 # so a client healed by one source won't be immediately re-flushed by the other.
 # (Duplicated from roam-detect.sh heal(); keep the two in sync — see AGENTS.md.)
 heal() { # $1 = mac, $2 = reason, $3 = current bss, $4 = "force" bypasses same-radio cooldown
+  mlo_heal_allowed "$1" "$3" "$BSSLIST" "$2" || return 0
   now=$(date +%s)
   key=$(echo "$1" | tr -d :)
   lf="$STATE/$key.lastflush"; lb="$STATE/$key.lastflushbss"

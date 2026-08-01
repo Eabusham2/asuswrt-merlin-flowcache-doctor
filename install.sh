@@ -2,7 +2,7 @@
 # install.sh — flowcache-doctor installer for Asuswrt-Merlin.
 #
 # Run ON the router (after enabling SSH + JFFS scripts, see README):
-#   curl -fsSL https://raw.githubusercontent.com/deviationist/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
 #
 # Or from a clone of this repo copied to the router:
 #   sh install.sh
@@ -10,7 +10,7 @@
 # Uninstall (removes daemon, watchdog, boot hooks, state):
 #   sh install.sh uninstall
 
-REPO_RAW="https://raw.githubusercontent.com/deviationist/asuswrt-merlin-flowcache-doctor/main"
+REPO_RAW="https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main"
 DEST=/jffs/scripts
 SS=$DEST/services-start
 CRU_ID=roam-detect-wd
@@ -30,7 +30,7 @@ if [ "$1" = "uninstall" ]; then
   cru d "$CRU_ID" 2>/dev/null
   [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
   [ -f "$PROFILE" ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" "$PROFILE"
-  rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roamctl" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
+  rm -f "$DEST/roam-detect.sh" "$DEST/roam-events.sh" "$DEST/roam-lib.sh" "$DEST/roam-mlo.sh" "$DEST/roamctl" "$DEST/roam-detect.policy" "$DEST/roam-detect.flush" "$DEST/roam-detect.conf" /tmp/roam-detect.disabled /tmp/roam-detect.update.sh
   rm -rf /tmp/roam-detect
   echo "flowcache-doctor uninstalled."
   echo "(the 'roamctl' alias stays live in THIS shell until you log out)"
@@ -44,7 +44,7 @@ FRESH=0
 
 # Fetch scripts (prefer local copies when run from a checkout)
 mkdir -p "$DEST"
-for f in roam-detect.sh roam-events.sh roam-lib.sh roamctl; do
+for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl; do
   if [ -f "./scripts/$f" ]; then
     cp "./scripts/$f" "$DEST/$f"
   else
@@ -65,8 +65,14 @@ mkdir -p /jffs/configs
 [ -f "$PROFILE" ] || { : > "$PROFILE"; chmod 644 "$PROFILE"; }
 grep -q "^alias roamctl=" "$PROFILE" || echo "alias roamctl='$DEST/roamctl'   $ALIAS_TAG" >> "$PROFILE"
 
-# Fresh installs heal out of the box (audit-only available: roamctl flush off)
-[ "$FRESH" = "1" ] && touch "$DEST/roam-detect.flush"
+# Fresh installs enable healing, but strict MLO safety means nothing is
+# flushed until a non-MLO MAC is explicitly authorized with roamctl allow.
+if [ "$FRESH" = "1" ]; then
+  touch "$DEST/roam-detect.flush"
+  [ -f "$DEST/roam-detect.conf" ] || cat > "$DEST/roam-detect.conf" <<'EOFCONF'
+MLO_SAFETY_MODE="strict"
+EOFCONF
+fi
 
 # Arm now. restart, not start: on update the daemons are already running
 # the OLD code — start would no-op and leave stale processes; restart makes
@@ -79,8 +85,9 @@ sleep 2
 
 cat <<'EOF'
 
-Installed and HEALING (per-client flushes on roam events, rate-limited —
-never a global flush). Restarts on crash (60s watchdog), survives reboots.
+Installed in STRICT MLO-SAFE mode. MLO and unclassified clients are never
+flushed. Add only known non-MLO clients with `roamctl allow <MAC>`; those
+clients then receive per-client, rate-limited healing (never a global flush). Restarts on crash (60s watchdog), survives reboots.
 The event listener runs automatically when your firmware provides
 /jffs/wifi_wlc.log; otherwise the 2s poller covers everything.
 Watched interfaces are AUTO-DETECTED (works on routers and AiMesh nodes;
@@ -92,6 +99,8 @@ From your NEXT login you can type plain "roamctl" instead of the full path
 (an alias was added to /jffs/configs/profile.add). Until then, use the path:
 
 Useful commands:
+  /jffs/scripts/roamctl clients     # classifications and protected clients
+  /jffs/scripts/roamctl allow MAC   # authorize a known non-MLO client
   /jffs/scripts/roamctl log         # what it has detected and healed
   /jffs/scripts/roamctl status      # running? healing? listener? version?
   /jffs/scripts/roamctl health      # full install + runtime health check

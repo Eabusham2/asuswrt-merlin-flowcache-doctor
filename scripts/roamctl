@@ -3,16 +3,19 @@
 # Provides systemd-like lifecycle on Asuswrt-Merlin: boot start, crash
 # watchdog (via cru/cron), manual stop that disarms the watchdog, and a
 # persistent on/off policy.
-VERSION=0.3.2
+VERSION=0.4.0-mlo-safe
 DAEMON=/jffs/scripts/roam-detect.sh
 EVDAEMON=/jffs/scripts/roam-events.sh    # wlceventd event listener (default-on when the event log exists)
 CONF=/jffs/scripts/roam-detect.conf
-REPO_RAW="https://raw.githubusercontent.com/deviationist/asuswrt-merlin-flowcache-doctor/main"
+REPO_RAW="https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main"
 UPDATE_TMP=/tmp/roam-detect.update.sh    # transient installer copy for 'update' (RAM)
 TAG=roam-detect
 FLAG=/tmp/roam-detect.disabled           # runtime manual-stop flag (cleared by start/reboot)
 POLICY=/jffs/scripts/roam-detect.policy  # persistent policy: "on" (default if absent) or "off"
 FLUSHFLAG=/jffs/scripts/roam-detect.flush # exists => auto-flush enabled (persistent)
+MLOLIB=/jffs/scripts/roam-mlo.sh
+NON_MLO_ALLOW_FILE=/jffs/scripts/roam-nonmlo.allow
+MLO_IGNORE_FILE=/jffs/scripts/roam-mlo.ignore
 
 # busybox on these routers has no pgrep/pkill. A naive `ps | grep` also
 # matches the *calling* SSH session if its command line mentions the daemon
@@ -67,6 +70,9 @@ case "$1" in
             start_ev ;;
   status)   echo "version: $VERSION"
             echo "policy: $(policy)"; echo "autoflush: $([ -f "$FLUSHFLAG" ] && echo on || echo off)"
+            MLO_SAFETY_MODE=strict; [ -f "$CONF" ] && . "$CONF"
+            echo "MLO safety: $MLO_SAFETY_MODE (fail-closed)"
+            echo "authorized non-MLO MACs: $(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null)"
             p=$(echo $(pids))     # word-split to one line (union can be multi-pid)
             if [ -n "$p" ]; then echo "running (pid $p)"; else echo "not running$([ -f $FLAG ] && echo ' (manually stopped)')"; fi
             if events_enabled; then
@@ -95,6 +101,43 @@ case "$1" in
               off) rm -f "$FLUSHFLAG"; logger -t "$TAG" "auto-flush disabled (log-only)"; echo "autoflush: off" ;;
               *)   echo "autoflush: $([ -f "$FLUSHFLAG" ] && echo on || echo off)" ;;
             esac ;;
+  allow)    mac=$(echo "$2" | tr 'A-F' 'a-f')
+            echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "usage: roamctl allow aa:bb:cc:dd:ee:ff"; exit 1; }
+            mkdir -p /jffs/scripts; touch "$NON_MLO_ALLOW_FILE"
+            grep -Eiq "^$mac([[:space:]]|$)" "$NON_MLO_ALLOW_FILE" || echo "$mac" >> "$NON_MLO_ALLOW_FILE"
+            echo "authorized as non-MLO: $mac" ;;
+  unallow)  mac=$(echo "$2" | tr 'A-F' 'a-f')
+            [ -f "$NON_MLO_ALLOW_FILE" ] || { echo "not authorized: $mac"; exit 0; }
+            awk -v m="$mac" 'tolower($1)!=m' "$NON_MLO_ALLOW_FILE" > "$NON_MLO_ALLOW_FILE.tmp" && mv "$NON_MLO_ALLOW_FILE.tmp" "$NON_MLO_ALLOW_FILE"
+            echo "removed non-MLO authorization: $mac" ;;
+  ignore)   mac=$(echo "$2" | tr 'A-F' 'a-f')
+            echo "$mac" | grep -Eq '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' || { echo "usage: roamctl ignore aa:bb:cc:dd:ee:ff"; exit 1; }
+            mkdir -p /jffs/scripts; touch "$MLO_IGNORE_FILE"
+            grep -Eiq "^$mac([[:space:]]|$)" "$MLO_IGNORE_FILE" || echo "$mac" >> "$MLO_IGNORE_FILE"
+            echo "permanently protected from flushing: $mac" ;;
+  unignore) mac=$(echo "$2" | tr 'A-F' 'a-f')
+            [ -f "$MLO_IGNORE_FILE" ] || { echo "not explicitly ignored: $mac"; exit 0; }
+            awk -v m="$mac" 'tolower($1)!=m' "$MLO_IGNORE_FILE" > "$MLO_IGNORE_FILE.tmp" && mv "$MLO_IGNORE_FILE.tmp" "$MLO_IGNORE_FILE"
+            echo "removed explicit ignore: $mac" ;;
+  clients)  BSSLIST="auto"; [ -f "$CONF" ] && . "$CONF"
+            [ -f /jffs/scripts/roam-lib.sh ] && . /jffs/scripts/roam-lib.sh
+            [ "$BSSLIST" = "auto" ] && BSSLIST=$(effective_bsslist auto)
+            [ -f "$MLOLIB" ] || { echo "missing $MLOLIB"; exit 1; }
+            . "$MLOLIB"
+            MAP=/tmp/roam-detect/.clients.$$
+            : > "$MAP"
+            for b in $BSSLIST; do
+              for m in $(wl -i "$b" assoclist 2>/dev/null | awk '{print tolower($2)}'); do echo "$m $b" >> "$MAP"; done
+            done
+            RD_ASSOC_MAP="$MAP"; export RD_ASSOC_MAP
+            printf '%-18s %-24s %s\n' MAC RADIOS CLASSIFICATION
+            for m in $(awk '{print $1}' "$MAP" | sort -u); do
+              radios=$(awk -v x="$m" '$1==x {printf "%s%s", sep, $2; sep=","}' "$MAP")
+              first=$(awk -v x="$m" '$1==x {print $2; exit}' "$MAP")
+              class=$(mlo_classify_client "$m" "$first" "$BSSLIST")
+              printf '%-18s %-24s %s\n' "$m" "$radios" "$class"
+            done
+            rm -f "$MAP" ;;
   boot)     [ "$(policy)" = "on" ] || exit 0
             [ -n "$(pids)" ] || "$DAEMON" >/dev/null 2>&1 &
             start_ev ;;
@@ -135,7 +178,7 @@ case "$1" in
             echo "flowcache-doctor $VERSION health check"
             # --- install integrity ---
             [ "$(nvram get jffs2_scripts)" = "1" ] && ok "JFFS custom scripts enabled" || bad "JFFS custom scripts disabled (nvram jffs2_scripts)"
-            for f in "$DAEMON" "$EVDAEMON" /jffs/scripts/roam-lib.sh; do
+            for f in "$DAEMON" "$EVDAEMON" /jffs/scripts/roam-lib.sh "$MLOLIB"; do
               [ -x "$f" ] && ok "present+executable: $f" || bad "missing or not executable: $f"
             done
             SS=/jffs/scripts/services-start
@@ -200,6 +243,9 @@ case "$1" in
             # --- runtime ---
             [ "$(policy)" = "on" ] && ok "policy on" || note "policy off — daemons disabled persistently (roamctl policy on)"
             [ -f "$FLUSHFLAG" ] && ok "auto-flush on" || note "auto-flush off — audit-only mode (roamctl flush on)"
+            MLO_SAFETY_MODE=strict; [ -f "$CONF" ] && . "$CONF"
+            [ "$MLO_SAFETY_MODE" = "strict" ] && ok "MLO safety strict: MLO/unclassified clients cannot be flushed" || note "MLO safety mode is $MLO_SAFETY_MODE; strict is safest"
+            ok "authorized non-MLO list: $NON_MLO_ALLOW_FILE ($(awk 'tolower($1) ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ {n++} END{print n+0}' "$NON_MLO_ALLOW_FILE" 2>/dev/null) entries)"
             p=$(echo $(pids))
             [ -n "$p" ] && ok "poller running (pid $p)" || bad "poller NOT running"
             if events_enabled; then
@@ -230,10 +276,10 @@ case "$1" in
             SS=/jffs/scripts/services-start
             [ -f "$SS" ] && sed -i '/roamctl boot/d; /roam-detect-wd/d' "$SS"
             [ -f /jffs/configs/profile.add ] && sed -i "/^alias roamctl=.*flowcache-doctor/d" /jffs/configs/profile.add
-            rm -f "$DAEMON" "$EVDAEMON" /jffs/scripts/roam-lib.sh "$POLICY" "$FLAG" "$FLUSHFLAG" "$CONF" /tmp/roam-events.pid "$UPDATE_TMP"
+            rm -f "$DAEMON" "$EVDAEMON" /jffs/scripts/roam-lib.sh "$MLOLIB" "$NON_MLO_ALLOW_FILE" "$MLO_IGNORE_FILE" "$POLICY" "$FLAG" "$FLUSHFLAG" "$CONF" /tmp/roam-events.pid "$UPDATE_TMP"
             rm -rf /tmp/roam-detect
             logger -t "$TAG" "uninstalled"
             echo "flowcache-doctor uninstalled."
             rm -f "$0" ;;
-  *)        echo "usage: roamctl start|stop|restart|status|health|log|watchdog|boot|policy [on|off]|flush [on|off]|update|uninstall" ;;
+  *)        echo "usage: roamctl start|stop|restart|status|health|log|clients|allow MAC|unallow MAC|ignore MAC|unignore MAC|watchdog|boot|policy [on|off]|flush [on|off]|update|uninstall" ;;
 esac
