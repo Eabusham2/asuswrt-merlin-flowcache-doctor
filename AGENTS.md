@@ -122,6 +122,18 @@ editing anything.
   `deferred: stale-fdb ...` classifies correctly too; keep the reason strings
   and that match in step. Both heal() copies carry this — part of the
   heal()-sync rule, and `tests/bounce-ladder.sh` fails if only one changes.
+- **Group MACs are not clients** (v0.3.5): the listener's MAC regex is
+  permissive, and the driver emits `Deauth_ind FF:FF:FF:FF:FF:FF` every time
+  a BSS goes down (radio toggled, band disabled, `restart_wireless`). Without
+  a guard that parses as a client departure and gets healed — a flush plus a
+  full settle ladder on a MAC that owns no flows, plus `ffffffffffff.*` state
+  that reads like a real client mid-incident. `is_unicast()` in
+  `roam-events.sh` rejects any address with the LSB of octet 1 set (IEEE 802
+  group bit), guarding **both** the assoc and the deauth branches. It is
+  deliberately NOT in `roam-detect.sh` — that daemon's MACs come from
+  `wl assoclist`, which only lists real stations. Note the test is the group
+  bit (bit 0), **not** the U/L bit (bit 1): the household iPhone uses a
+  locally-administered `c2:...` address and must still heal.
 - **Every artifact is inventoried** (see README's manual-install table) and
   **all three uninstall paths** (`roamctl uninstall`, `uninstall.sh`,
   `install.sh uninstall`) must remove every artifact, including any new one
@@ -142,6 +154,10 @@ editing anything.
 ## Testing
 
 - Syntax: `for f in setup.sh install.sh uninstall.sh scripts/*; do sh -n "$f"; done`
+- **MAC-filter fixtures: `sh tests/mac-filter.sh`** — run after any change to
+  the listener's MAC parsing. Extracts `is_unicast()` verbatim from the shipped
+  script and pins broadcast/multicast rejection against real client addresses
+  from the dev deployment, including the locally-administered one.
 - **Ladder fixtures: `sh tests/bounce-ladder.sh`** — run after ANY change to
   `heal()`. It extracts heal() verbatim from *both* daemons and drives it
   against a stubbed clock/`fcctl`/`logger`, pinning which re-arms count as a

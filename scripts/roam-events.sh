@@ -44,6 +44,26 @@ fi
 # the two in sync, same rule as heal(); see AGENTS.md)
 want() { case " $HEAL_TRIGGERS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
+# Is this a real client MAC? A group (broadcast/multicast) address is not.
+# The driver emits `Deauth_ind FF:FF:FF:FF:FF:FF` whenever a BSS goes down —
+# radio toggled, band disabled, restart_wireless. Without this guard that
+# line parses as a client departure and gets "healed": one flush plus a full
+# settle ladder spent on a MAC that owns no flows, and ffffffffffff.* state
+# files that read like a real client in the log. Harmless to the flow cache
+# (`fcctl flush --mac` is a filter and a group address matches nothing —
+# broadcast/multicast is flooded, never flow-cached) but actively misleading
+# mid-incident, which is when the log matters most. Observed live on two
+# separate BSS-down events, 2026-08-19.
+# IEEE 802: LSB of the first octet set => group address.
+# NOT needed in roam-detect.sh — its MACs come from `wl assoclist`, which
+# only ever lists real associated stations.
+is_unicast() {
+  case "$1" in
+    ??:??:??:??:??:??) o=${1%%:*}; [ $(( 0x$o & 1 )) -eq 0 ] ;;
+    *) return 1 ;;
+  esac
+}
+
 if [ ! -f "$EVLOG" ]; then
   logger -t "$TAG" "event source $EVLOG not present on this firmware — standing down (the polling daemon covers healing)"
   exit 0
@@ -142,7 +162,7 @@ while read -r line; do
     *": Assoc "*Successful*|*": ReAssoc "*Successful*)
       bss=$(echo "$line" | awk -F': ' '{print $2}')
       mac=$(echo "$line" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -1 | tr 'A-F' 'a-f')
-      [ -n "$mac" ] && [ -n "$bss" ] && heal "$mac" "event assoc on $bss" "$bss"
+      [ -n "$mac" ] && is_unicast "$mac" && [ -n "$bss" ] && heal "$mac" "event assoc on $bss" "$bss"
       ;;
     *": Deauth_ind "*|*": Disassoc "*)
       # A deauth/disassoc from a radio the client is NO LONGER on is the
@@ -153,7 +173,7 @@ while read -r line; do
       # (the preceding assoc-flush is otherwise still fresh).
       evbss=$(echo "$line" | awk -F': ' '{print $2}')
       mac=$(echo "$line" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -1 | tr 'A-F' 'a-f')
-      if [ -n "$mac" ] && [ -n "$evbss" ]; then
+      if [ -n "$mac" ] && is_unicast "$mac" && [ -n "$evbss" ]; then
         # Live assoclist lookup (NOT the poller's state file — during churn
         # that lags by up to a minute, which would mask exactly this race).
         curbss=""
