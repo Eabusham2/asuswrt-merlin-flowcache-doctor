@@ -20,6 +20,7 @@ COOLDOWN=60
 MIN_GAP=8
 HEAL_TRIGGERS="roam stale-fdb dual-settle departure"   # keep default in sync with roam-detect.sh
 SETTLE_FLUSHES="20 60 300 600"  # keep default in sync with roam-detect.sh (ladder drained by the poller)
+BOUNCE_FLUSHES="10 20 60 300 600"  # keep default in sync with roam-detect.sh (healed-mid-transition ladder)
 TAG=roam-events
 STATE=/tmp/roam-detect
 FLUSHFLAG=/jffs/scripts/roam-detect.flush
@@ -77,7 +78,43 @@ heal() { # $1 = mac, $2 = reason, $3 = current bss, $4 = "force" bypasses same-r
     logger -t "$TAG" "FLUSHED $1 ($2)"
     # Schedule the settle-flush ladder (the POLLER drains it — this listener
     # only writes the marker; a newer heal overwrites it, restarting the ladder).
-    [ -n "$SETTLE_FLUSHES" ] && echo "$1|$now|$3|$SETTLE_FLUSHES" > "$STATE/$key.settle"
+    if [ -n "$SETTLE_FLUSHES" ]; then
+      rungs=$SETTLE_FLUSHES
+      # Bounce-aware ladder. Re-arming a ladder that is STILL RUNNING means
+      # the driver was very likely still settling when the previous heal
+      # landed: that flush re-bakes poisoned state, and recovery then waits
+      # the whole first rung. Two independent tells, either one is enough —
+      #   (1) the ladder's radio CHANGED: the client hopped again, the
+      #       multi-hop bounce (field incident 2026-08-19 13:47);
+      #   (2) this heal is a TRANSITION trigger: the client is moving right
+      #       now even though it was already seen on the destination radio
+      #       (field incident 2026-08-19 15:35 — both heals named wl1.1 and
+      #       the ROAM landed 2 s after the second, so tell (1) alone missed
+      #       it and the freeze ran the full 20 s).
+      # Tell (2) is why this keys on the trigger and not just the radio: a
+      # radio change is only one symptom of "healed mid-transition". The one
+      # churn class is stale-fdb — a forwarding-table correction on a client
+      # that has NOT moved; compressing that would raise the flush rate for
+      # nothing. Matching on the reason string catches `deferred: stale-fdb
+      # ...` too, since the deferral keeps the original reason as a suffix.
+      # Keep the reason strings and this match in step.
+      if [ -n "$BOUNCE_FLUSHES" ] && [ -f "$STATE/$key.settle" ]; then
+        IFS='|' read _bmac _bbase bprev _brungs < "$STATE/$key.settle"
+        bwhy=""
+        [ -n "$bprev" ] && [ "$bprev" != "$3" ] && bwhy="$bprev -> $3"
+        if [ -z "$bwhy" ]; then
+          case "$2" in
+            *stale-fdb*) ;;                       # churn on one radio: leave alone
+            *) bwhy="transition on $3 ($2)" ;;
+          esac
+        fi
+        if [ -n "$bwhy" ]; then
+          rungs=$BOUNCE_FLUSHES
+          logger -t "$TAG" "BOUNCE $1 $bwhy mid-ladder — compressed rungs ($rungs)"
+        fi
+      fi
+      echo "$1|$now|$3|$rungs" > "$STATE/$key.settle"
+    fi
   else
     logger -t "$TAG" "WOULD FLUSH $1 ($2) — enable with: roamctl flush on"
   fi

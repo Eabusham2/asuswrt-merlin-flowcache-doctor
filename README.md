@@ -485,6 +485,7 @@ COOLDOWN=60                  # min seconds between flushes per client (same radi
 MIN_GAP=8                    # hard floor between flushes per client (any radio)
 HEAL_TRIGGERS="roam stale-fdb dual-settle departure"   # which triggers may flush
 SETTLE_FLUSHES="20 60 300 600"   # follow-up flush offsets (s) after each heal; "" disables
+BOUNCE_FLUSHES="10 20 60 300 600"  # ladder used instead when a heal lands mid-transition; "" disables
 LOG_EVENTS=1                 # 0 = quiet mode: log only actions (FLUSHED) + lifecycle
 EVENT_HEAL=1                 # 0 = disable the wlceventd event listener (poller only)
 ```
@@ -544,6 +545,32 @@ while flows re-learn); on a poisoned one, the first rung past the
 settling window cures it. A new roam mid-ladder restarts the ladder, and
 a client that departed to another AiMesh unit still gets its rungs on the
 unit it left — where its stale entries actually live.
+
+`BOUNCE_FLUSHES` (v0.3.3, widened in v0.3.4) covers the case where the heal
+fires *on time and on the right client* and the blackhole still outlives it.
+The trigger is a heal that **re-arms a ladder which is still running** — that
+means the previous heal very likely landed while the driver was still
+settling, so it re-baked the poison and recovery would otherwise wait the
+whole first rung. Two independent tells, either is enough:
+
+1. **The ladder's radio changed** — the client hopped again. Observed
+   2026-08-19 13:47: 6 GHz → 5 GHz → 6 GHz inside a minute, which band
+   steering does produce, each hop re-poisoning.
+2. **The heal is a transition trigger** (`event assoc`, `stale-radio deauth`,
+   `roam`, `dual-settle`, `departure` — anything but `stale-fdb`). The client
+   is moving *now* even if it was already seen on the destination radio.
+   Observed 2026-08-19 15:35: a plain 6 GHz → 5 GHz roam where **both** heals
+   named the destination radio and the `ROAM` line landed 2 s after the
+   second. Tell 1 alone missed it and the session froze for the full 49 s.
+
+`stale-fdb` is deliberately excluded: it's a forwarding-table correction on a
+client that has **not** moved, so compressing it would raise the flush rate
+for nothing. The `deferred:` form keeps the original reason as a suffix and
+classifies the same way.
+
+Only the first rung moves (20 s → 10 s); `MIN_GAP` floors the drain, which is
+why it is 10 and not lower. These heals log as
+`BOUNCE <mac> <tell> mid-ladder — compressed rungs (...)`.
 
 Restart after editing: `/jffs/scripts/roamctl restart`. `BSSLIST` is the one
 most people need (per-model interface names); the timing knobs are for the

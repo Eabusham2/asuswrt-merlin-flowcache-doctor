@@ -107,6 +107,21 @@ editing anything.
   iterates marker files, NOT the assoclist, so departed clients still get
   their rungs on the unit they left. Don't convert the ladder into
   detection — the incident class has no observable signature.
+- **Bounce-aware ladder** (v0.3.3, widened v0.3.4): a heal that re-arms a
+  *still-running* ladder means the previous heal probably landed while the
+  driver was still settling — it re-baked poison, and recovery then waits the
+  whole first rung. Such a re-arm uses `$BOUNCE_FLUSHES` when **either** tell
+  fires: the ladder's radio changed (multi-hop bounce, field incident
+  2026-08-19 13:47), **or** the heal is a transition trigger — anything but
+  `stale-fdb` (field incident 2026-08-19 15:35: a single 6→5 GHz roam where
+  both heals named the destination radio, so the radio tell alone missed it
+  and an SSH session froze 49 s). Key on the trigger, not just the radio: a
+  radio change is only one symptom of "healed mid-transition". Keep
+  `stale-fdb` excluded — it corrects a client that has not moved, and
+  compressing it buys nothing. The match is on the reason string, so
+  `deferred: stale-fdb ...` classifies correctly too; keep the reason strings
+  and that match in step. Both heal() copies carry this — part of the
+  heal()-sync rule, and `tests/bounce-ladder.sh` fails if only one changes.
 - **Every artifact is inventoried** (see README's manual-install table) and
   **all three uninstall paths** (`roamctl uninstall`, `uninstall.sh`,
   `install.sh uninstall`) must remove every artifact, including any new one
@@ -127,6 +142,11 @@ editing anything.
 ## Testing
 
 - Syntax: `for f in setup.sh install.sh uninstall.sh scripts/*; do sh -n "$f"; done`
+- **Ladder fixtures: `sh tests/bounce-ladder.sh`** — run after ANY change to
+  `heal()`. It extracts heal() verbatim from *both* daemons and drives it
+  against a stubbed clock/`fcctl`/`logger`, pinning which re-arms count as a
+  bounce. Because every case runs against both copies, it is also the
+  automated enforcement of the heal()-sync rule.
 - **Resolver fixtures: `sh tests/resolver-fixtures.sh`** — run this after ANY
   change to `resolve_bsslist()`. It replays real captured hardware layouts
   (the maintainer's live BE92U router, a tester's BE92U node, AX3000 node,
