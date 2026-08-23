@@ -15,10 +15,8 @@ PIDFILE="$STATE/pid"
 LOCK="$STATE/daemon.lock"
 
 num_ok(){ case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
-for _v in FCD_MLO_HW_SETTLE FCD_MLO_HW_COOLDOWN; do
-  eval _x=\$$_v
-  num_ok "$_x" || eval "$_v=3"
-done
+num_ok "$FCD_MLO_HW_SETTLE" || FCD_MLO_HW_SETTLE=3
+num_ok "$FCD_MLO_HW_COOLDOWN" || FCD_MLO_HW_COOLDOWN=60
 [ "$FCD_MLO_HW_SETTLE" -ge 2 ] || FCD_MLO_HW_SETTLE=2
 [ "$FCD_MLO_HW_COOLDOWN" -ge 15 ] || FCD_MLO_HW_COOLDOWN=15
 
