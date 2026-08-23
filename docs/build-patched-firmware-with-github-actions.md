@@ -6,35 +6,31 @@ The repository contains a manual GitHub Actions workflow:
 
 `.github/workflows/build-gt-be19000ai-patched.yml`
 
-By default it builds the exact Asuswrt-Merlin release tag `3006.102.8_4`, patches the verified `dhd_pktfwd.c` association/reassociation cleanup gate directly, verifies the resulting Git diff, builds `gt-be19000ai`, and uploads the resulting firmware as an Actions artifact.
+For GT-BE19000AI, **do not use the generic `3006.102.8_4` tag**. This model is maintained on Merlin's separate `asuswrt6` lineage. The workflow is pinned to the exact GT-BE19000AI `3006.102.8_4` release commit:
 
-The direct source edit is intentional: the first workflow version used a hand-written patch file whose unified-diff hunk was malformed and `git apply` rejected it. The workflow now requires exactly one matching source gate and aborts if upstream source no longer matches that expectation.
+`e6ec7e95706d321c50d1b4b2f912b26323f6163e`
+
+That upstream commit's subject mistakenly says `_8_2`, but its actual `version.conf` change is `EXTENDNO=3` to `EXTENDNO=4`. The workflow verifies `SERIALNO=102.8` and `EXTENDNO=4` before building.
+
+The workflow patches the verified `dhd_pktfwd.c` association/reassociation cleanup gate directly, verifies the resulting Git diff, builds the real Merlin target `gt-be19000ai`, and uploads the resulting firmware as an Actions artifact.
+
+Before compiling, CI also verifies that this source tree actually contains the GT-BE19000AI model definition, BCM6813 chip profile, model config, and model-specific `afcd`/`locpold` prebuilts. This catches the exact source-lineage error that previously produced `NO THIS TARGET gt-be19000ai`.
 
 ## Run it
 
 1. Open this repository on GitHub.
 2. Click **Actions**.
-3. Click **Build patched GT-BE19000AI firmware** in the left sidebar.
+3. Click **Build patched GT-BE19000AI firmware**.
 4. Click **Run workflow**.
-5. Leave `merlin_ref` as `3006.102.8_4`.
-6. Click the green **Run workflow** button.
-7. Open the new run once it appears.
-8. When it finishes successfully, scroll to **Artifacts**.
-9. Download `GT-BE19000AI-pktfwd-patched-<run number>`.
-10. Unzip it on the Mac.
+5. Click the green **Run workflow** button. There is no source-ref field anymore; the correct immutable release commit is pinned in the workflow.
+6. Open the new run once it appears.
+7. When it finishes successfully, scroll to **Artifacts**.
+8. Download `GT-BE19000AI-3006.102.8_4-pktfwd-patched-<run number>`.
+9. Unzip it on the Mac.
 
 Do **not** use **Re-run jobs** on an older failed workflow run after the workflow itself has been changed. Start a brand-new manual run from current `main` so GitHub uses the current workflow definition.
 
-The artifact contains:
-
-- the generated `*_emmc_squashfs.pkgtb` firmware image;
-- `FIRMWARE_SHA256.txt`;
-- `MERLIN_COMMIT.txt`;
-- `PATCH_REPO_COMMIT.txt`;
-- `PATCH_SHA256.txt`;
-- `APPLIED_SOURCE_DIFF.patch`;
-- `PATCHED_SOURCE_SNIPPET.txt`;
-- `BUILD.log`.
+The artifact contains the generated `*_emmc_squashfs.pkgtb`, its SHA-256, the exact upstream Merlin commit/lineage, baseline verification, the applied source diff/hash, the patched source snippet, and the build log.
 
 ## What file do I upload to the router?
 
@@ -52,4 +48,6 @@ Before flashing, back up the router configuration and JFFS.
 
 In the router UI open **Administration > Firmware Upgrade**, manually upload the generated `*_emmc_squashfs.pkgtb`, and let the router reboot normally.
 
-This is an experimental custom firmware build. The workflow records the exact upstream Merlin commit and applied source diff so the image can be audited/reproduced.
+This is an experimental custom firmware build. The workflow records enough provenance to audit exactly what was built.
+
+For the permanent project rules used for future firmware changes, see `docs/FIRMWARE_UPDATE_POLICY.md`.
