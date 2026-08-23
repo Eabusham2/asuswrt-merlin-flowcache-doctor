@@ -2,15 +2,18 @@ name: Build patched GT-BE19000AI firmware
 
 on:
   workflow_dispatch:
-    inputs:
-      merlin_ref:
-        description: Merlin branch/tag/ref to build
-        required: true
-        default: 3006.102.8_4
-        type: string
 
 permissions:
   contents: read
+
+env:
+  # GT-BE19000AI is maintained on Merlin's separate asuswrt6 lineage.
+  # This is the 20-Aug-2026 3006.102.8_4 release commit on that lineage.
+  # Upstream commit message mistakenly says _8_2, but its version.conf diff is 3 -> 4.
+  MERLIN_BRANCH: asuswrt6
+  MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
+  EXPECTED_SERIALNO: "102.8"
+  EXPECTED_EXTENDNO: "4"
 
 jobs:
   build:
@@ -33,19 +36,51 @@ jobs:
           df -h / /mnt /project
           id
 
-      - name: Fetch Merlin source
+      - name: Fetch exact GT-BE19000AI Merlin source
         shell: bash
-        env:
-          MERLIN_REF: ${{ inputs.merlin_ref }}
         run: |
           set -euo pipefail
           cd /project
           rm -rf merlin
-          git clone --depth 1 --branch "$MERLIN_REF" \
-            https://github.com/RMerl/asuswrt-merlin.ng.git merlin
+          git init merlin
           cd merlin
-          git rev-parse HEAD | tee /project/artifacts/MERLIN_COMMIT.txt
-          git status --short
+          git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
+          git fetch --depth 1 origin "$MERLIN_COMMIT"
+          git checkout --detach FETCH_HEAD
+
+          ACTUAL=$(git rev-parse HEAD)
+          printf '%s\n' "$ACTUAL" | tee /project/artifacts/MERLIN_COMMIT.txt
+          printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
+          test "$ACTUAL" = "$MERLIN_COMMIT"
+
+      - name: Verify GT-BE19000AI release baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project/merlin
+          TARGET=release/src-rt-5.04behnd.4916/target.mak
+          CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
+          MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
+          VERSION=release/src-rt/version.conf
+
+          # Catch the exact mistake that previously produced "NO THIS TARGET gt-be19000ai".
+          grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+          grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
+          test -s "$MODEL_CFG"
+          grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
+          grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
+
+          # GT-BE19000AI-specific closed/prebuilt pieces expected by this tree.
+          test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
+          test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
+
+          {
+            echo "lineage=$MERLIN_BRANCH"
+            echo "commit=$MERLIN_COMMIT"
+            grep -E '^(SERIALNO|EXTENDNO)=' "$VERSION"
+            grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
+            grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+          } | tee /project/artifacts/BASELINE_VERIFICATION.txt
 
       - name: Patch and verify PKTFWD source
         shell: bash
@@ -74,8 +109,7 @@ jobs:
               f"{indent}    (param2 == WLC_E_REASSOC) ||\n"
               f"{indent}    (param2 == WLC_E_REASSOC_IND)) {{"
           )
-          text = pattern.sub(replacement, text, count=1)
-          p.write_text(text)
+          p.write_text(pattern.sub(replacement, text, count=1))
           PY
 
           cd /project/merlin
@@ -97,10 +131,14 @@ jobs:
           export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
           cd /project/merlin/release/src-rt-5.04behnd.4916
-          echo "Toolchain:"
+
+          echo "Toolchain PATH checks:"
           command -v aarch64-buildroot-linux-gnu-gcc || true
+          command -v arm-buildroot-linux-gnueabi-gcc || true
           echo "Disk at build start:"
           df -h /project
+
+          # This is Merlin's real target for GT-BE19000AI. Do not rename it.
           make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
 
       - name: Package firmware
@@ -109,15 +147,13 @@ jobs:
           set -euo pipefail
           IMGDIR=/project/merlin/release/src-rt-5.04behnd.4916/image
           mapfile -t images < <(find "$IMGDIR" -maxdepth 1 -type f -name '*_emmc_squashfs.pkgtb' -print)
-          if [ "${#images[@]}" -lt 1 ]; then
-            echo "No GT-BE19000AI emmc firmware image was produced." >&2
+          if [ "${#images[@]}" -ne 1 ]; then
+            echo "Expected exactly one GT-BE19000AI *_emmc_squashfs.pkgtb; found ${#images[@]}." >&2
             find "$IMGDIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true
             exit 1
           fi
 
-          for image in "${images[@]}"; do
-            cp -v "$image" /project/artifacts/
-          done
+          cp -v "${images[0]}" /project/artifacts/
           cd /project/artifacts
           sha256sum ./*_emmc_squashfs.pkgtb | tee FIRMWARE_SHA256.txt
           ls -lh ./*_emmc_squashfs.pkgtb
@@ -126,12 +162,12 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: GT-BE19000AI-pktfwd-patched-${{ github.run_number }}
+          name: GT-BE19000AI-3006.102.8_4-pktfwd-patched-${{ github.run_number }}
           path: /project/artifacts
           if-no-files-found: error
           retention-days: 14
 
-      - name: Upload build log on failure
+      - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
