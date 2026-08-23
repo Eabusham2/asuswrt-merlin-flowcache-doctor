@@ -30,7 +30,7 @@ rollback(){
   [ -e "$BACKUP/profile.add" ] && cp -p "$BACKUP/profile.add" "$PROFILE"
   rm -rf /tmp/flowcache-doctor /tmp/roam-detect
   [ -x "$DEST/roamctl" ] && "$DEST/roamctl" start >/dev/null 2>&1
-  [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && [ -f /jffs/wifi_wlc.log ] && "$DEST/fcd-mlo-runner-heal.sh" start >/dev/null 2>&1
+  [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && "$DEST/fcd-mlo-runner-heal.sh" start >/dev/null 2>&1
   [ -f "$SS" ] && grep 'cru a roam-detect-wd' "$SS" 2>/dev/null | sh >/dev/null 2>&1
 }
 fail(){ echo "ERROR: $*" >&2; rollback; rm -rf "$TMP"; exit 1; }
@@ -81,12 +81,13 @@ FCD_STEER_MODE=advisor
 FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
 
-# Automatic MLO Runner stale-state repair. Triggered only by reassoc/deauth/disassoc lifecycle events.
+# Automatic MLO Runner stale-state repair. Triggered only by client lifecycle/reinit events.
 # It waits for the MLO session to settle, then invalidates only that client's HW-offloaded flows.
 # No global FlowCache flush, Runner cycle, Wi-Fi restart, steering, or deauthentication is performed.
 FCD_MLO_HW_HEAL=1
 FCD_MLO_HW_SETTLE=3
 FCD_MLO_HW_COOLDOWN=60
+FCD_MLO_KERNEL_EVENTS=1
 
 # Passive congestion correlation. It never steers, restarts, changes channels, or flushes a radio.
 FCD_UTIL_HIGH=85
@@ -134,12 +135,10 @@ printf '%s\n' "alias roamctl='$DEST/roamctl' # flowcache-doctor" >> "$PROFILE"
 rm -f "$DEST/flowcache-doctor.disabled"
 rm -rf /tmp/flowcache-doctor
 "$DEST/roamctl" start
-if [ -f /jffs/wifi_wlc.log ]; then
-  "$DEST/fcd-mlo-runner-heal.sh" start
-fi
+"$DEST/fcd-mlo-runner-heal.sh" start
 sleep 3
 "$DEST/roamctl" health || fail "installed files failed health check; previous version restored; backup is at $BACKUP"
-if [ -f /jffs/wifi_wlc.log ]; then
+if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
   "$DEST/fcd-mlo-runner-heal.sh" status >/dev/null 2>&1 || fail "MLO Runner healer failed to start; previous version restored; backup is at $BACKUP"
 fi
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
@@ -148,9 +147,9 @@ STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
 echo "Backup of the previous version: $BACKUP"
-if [ -f /jffs/wifi_wlc.log ]; then
+if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
   echo "MLO Runner hardware stale-state healer: active"
 else
-  echo "MLO Runner hardware stale-state healer: armed; waiting for /jffs/wifi_wlc.log"
+  echo "MLO Runner hardware stale-state healer: armed; waiting for event source"
 fi
 echo "Run: /jffs/scripts/roamctl clients"
