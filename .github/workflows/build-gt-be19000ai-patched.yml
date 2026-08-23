@@ -1,0 +1,123 @@
+name: Build patched GT-BE19000AI firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      merlin_ref:
+        description: Merlin branch/tag/ref to build
+        required: true
+        default: asuswrt6
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: GT-BE19000AI patched firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: gnuton/asuswrt-merlin-toolchains-docker:latest
+      options: --user docker
+      volumes:
+        - /mnt:/project
+
+    steps:
+      - name: Prepare large build volume
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R docker:docker /github/home /home/docker /project
+          mkdir -p /project/artifacts
+          echo "Disk before build:"
+          df -h / /mnt /project
+
+      - name: Fetch Merlin source
+        shell: bash
+        env:
+          MERLIN_REF: ${{ inputs.merlin_ref }}
+        run: |
+          set -euo pipefail
+          cd /project
+          rm -rf merlin
+          git clone --depth 1 --branch "$MERLIN_REF" \
+            https://github.com/RMerl/asuswrt-merlin.ng.git merlin
+          cd merlin
+          git rev-parse HEAD | tee /project/artifacts/MERLIN_COMMIT.txt
+          git status --short
+
+      - name: Fetch and verify source patch
+        shell: bash
+        env:
+          PATCH_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch
+        run: |
+          set -euo pipefail
+          curl -fL "$PATCH_URL" -o /project/gt-be19000ai-pktfwd.patch
+          sha256sum /project/gt-be19000ai-pktfwd.patch | tee /project/artifacts/PATCH_SHA256.txt
+          printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
+
+          cd /project/merlin
+          git apply --check /project/gt-be19000ai-pktfwd.patch
+          git apply /project/gt-be19000ai-pktfwd.patch
+          git diff --check
+          git diff -- \
+            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c \
+            | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+
+          grep -A12 -B3 'case dhd_pktfwd_req_assoc_sta_e' \
+            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c \
+            | tee /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
+
+          grep -q 'param2 == WLC_E_ASSOC_IND' \
+            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          grep -q 'param2 == WLC_E_REASSOC_IND' \
+            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+
+      - name: Build GT-BE19000AI
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /home/docker/envs/bcm-hnd-ax-4.19be.sh
+          cd /project/merlin/release/src-rt-5.04behnd.4916
+          echo "Toolchain:"
+          command -v aarch64-buildroot-linux-gnu-gcc || true
+          echo "Disk at build start:"
+          df -h /project
+          make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
+
+      - name: Package firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMGDIR=/project/merlin/release/src-rt-5.04behnd.4916/image
+          mapfile -t images < <(find "$IMGDIR" -maxdepth 1 -type f -name '*_emmc_squashfs.pkgtb' -print)
+          if [ "${#images[@]}" -lt 1 ]; then
+            echo "No GT-BE19000AI emmc firmware image was produced." >&2
+            find "$IMGDIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true
+            exit 1
+          fi
+
+          for image in "${images[@]}"; do
+            cp -v "$image" /project/artifacts/
+          done
+          cd /project/artifacts
+          sha256sum ./*_emmc_squashfs.pkgtb | tee FIRMWARE_SHA256.txt
+          ls -lh ./*_emmc_squashfs.pkgtb
+
+      - name: Upload patched firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT-BE19000AI-pktfwd-patched-${{ github.run_number }}
+          path: /project/artifacts
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT-BE19000AI-build-failure-${{ github.run_number }}
+          path: /project/artifacts
+          if-no-files-found: warn
+          retention-days: 7
