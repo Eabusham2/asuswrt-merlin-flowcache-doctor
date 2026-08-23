@@ -94,6 +94,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
           cd /project/merlin/release/src-rt-5.04behnd.4916
           echo "Toolchain:"
