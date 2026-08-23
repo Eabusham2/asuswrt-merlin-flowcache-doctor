@@ -30,7 +30,7 @@ rollback(){
   [ -e "$BACKUP/profile.add" ] && cp -p "$BACKUP/profile.add" "$PROFILE"
   rm -rf /tmp/flowcache-doctor /tmp/roam-detect
   [ -x "$DEST/roamctl" ] && "$DEST/roamctl" start >/dev/null 2>&1
-  [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && "$DEST/fcd-mlo-runner-heal.sh" start >/dev/null 2>&1
+  [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && [ -f /jffs/wifi_wlc.log ] && "$DEST/fcd-mlo-runner-heal.sh" start >/dev/null 2>&1
   [ -f "$SS" ] && grep 'cru a roam-detect-wd' "$SS" 2>/dev/null | sh >/dev/null 2>&1
 }
 fail(){ echo "ERROR: $*" >&2; rollback; rm -rf "$TMP"; exit 1; }
@@ -134,15 +134,23 @@ printf '%s\n' "alias roamctl='$DEST/roamctl' # flowcache-doctor" >> "$PROFILE"
 rm -f "$DEST/flowcache-doctor.disabled"
 rm -rf /tmp/flowcache-doctor
 "$DEST/roamctl" start
-"$DEST/fcd-mlo-runner-heal.sh" start
+if [ -f /jffs/wifi_wlc.log ]; then
+  "$DEST/fcd-mlo-runner-heal.sh" start
+fi
 sleep 3
 "$DEST/roamctl" health || fail "installed files failed health check; previous version restored; backup is at $BACKUP"
-"$DEST/fcd-mlo-runner-heal.sh" status >/dev/null 2>&1 || fail "MLO Runner healer failed to start; previous version restored; backup is at $BACKUP"
+if [ -f /jffs/wifi_wlc.log ]; then
+  "$DEST/fcd-mlo-runner-heal.sh" status >/dev/null 2>&1 || fail "MLO Runner healer failed to start; previous version restored; backup is at $BACKUP"
+fi
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
 [ -x "$DEST/fcd-incident.sh" ] || fail "incident capture missing after install"
 STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
 echo "Backup of the previous version: $BACKUP"
-echo "MLO Runner hardware stale-state healer: active"
+if [ -f /jffs/wifi_wlc.log ]; then
+  echo "MLO Runner hardware stale-state healer: active"
+else
+  echo "MLO Runner hardware stale-state healer: armed; waiting for /jffs/wifi_wlc.log"
+fi
 echo "Run: /jffs/scripts/roamctl clients"
