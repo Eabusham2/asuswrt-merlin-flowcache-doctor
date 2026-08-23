@@ -1,0 +1,32 @@
+From: GT-BE19000AI datapath investigation
+Subject: [PATCH] dhd: invalidate stale PKTFWD D3LUT on assoc/reassoc indications
+
+Broadcom's DHD blog connect path handles WLC_E_ASSOC, WLC_E_ASSOC_IND and
+WLC_E_REASSOC_IND (and may receive WLC_E_REASSOC), but dhd_pktfwd_request()
+only invalidates stale D3LUT state for WLC_E_ASSOC.
+
+On AP/MLO operation the client-side lifecycle is normally reported as
+ASSOC_IND/REASSOC_IND. If a prior station/link incarnation left a D3LUT
+entry behind, those events can therefore reuse stale PKTFWD radio/flowring
+state. FlowCache/Runner can subsequently learn hardware forwarding from
+that stale mapping.
+
+Make the stale-entry invalidation cover all association and reassociation
+request/indication events. dhd_pktfwd_lut_del() is already tolerant of a
+missing entry, so this is idempotent.
+
+--- a/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
++++ b/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+@@
+ 	case dhd_pktfwd_req_assoc_sta_e:	/* param0: d3addr, param1: 0|1 assoc */
+ 		/* param2: eventtype */
+-		if (param2 == WLC_E_ASSOC) {
++		if ((param2 == WLC_E_ASSOC) ||
++		    (param2 == WLC_E_ASSOC_IND) ||
++		    (param2 == WLC_E_REASSOC) ||
++		    (param2 == WLC_E_REASSOC_IND)) {
+ 			/* If a station is roaming, there might be stale entries in d3lut.
+ 			 * Look for symbol in global pool and delete if found.
+ 			 */
+ 			dhd_pktfwd_lut_del((uint8_t *) param0, (struct net_device *)NULL);
+ 		}
