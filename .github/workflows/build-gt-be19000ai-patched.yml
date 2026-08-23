@@ -19,7 +19,7 @@ jobs:
     timeout-minutes: 360
     container:
       image: gnuton/asuswrt-merlin-toolchains-docker:latest
-      options: --user docker
+      options: --user root
       volumes:
         - /mnt:/project
 
@@ -28,10 +28,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo chown -R docker:docker /github/home /home/docker /project
           mkdir -p /project/artifacts
           echo "Disk before build:"
           df -h / /mnt /project
+          id
 
       - name: Fetch Merlin source
         shell: bash
@@ -47,32 +47,46 @@ jobs:
           git rev-parse HEAD | tee /project/artifacts/MERLIN_COMMIT.txt
           git status --short
 
-      - name: Fetch and verify source patch
+      - name: Patch and verify PKTFWD source
         shell: bash
-        env:
-          PATCH_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch
         run: |
           set -euo pipefail
-          curl -fL "$PATCH_URL" -o /project/gt-be19000ai-pktfwd.patch
-          sha256sum /project/gt-be19000ai-pktfwd.patch | tee /project/artifacts/PATCH_SHA256.txt
+          SRC=/project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
           printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
 
+          python3 - "$SRC" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          text = p.read_text()
+          pattern = re.compile(r'(?m)^(\s*)if \(param2 == WLC_E_ASSOC\) \{$')
+          matches = list(pattern.finditer(text))
+          if len(matches) != 1:
+              raise SystemExit(f"expected exactly one WLC_E_ASSOC cleanup gate, found {len(matches)}")
+
+          indent = matches[0].group(1)
+          replacement = (
+              f"{indent}if ((param2 == WLC_E_ASSOC) ||\n"
+              f"{indent}    (param2 == WLC_E_ASSOC_IND) ||\n"
+              f"{indent}    (param2 == WLC_E_REASSOC) ||\n"
+              f"{indent}    (param2 == WLC_E_REASSOC_IND)) {{"
+          )
+          text = pattern.sub(replacement, text, count=1)
+          p.write_text(text)
+          PY
+
           cd /project/merlin
-          git apply --check /project/gt-be19000ai-pktfwd.patch
-          git apply /project/gt-be19000ai-pktfwd.patch
           git diff --check
-          git diff -- \
-            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c \
-            | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          git diff -- "$SRC" | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          sha256sum /project/artifacts/APPLIED_SOURCE_DIFF.patch | tee /project/artifacts/PATCH_SHA256.txt
 
-          grep -A12 -B3 'case dhd_pktfwd_req_assoc_sta_e' \
-            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c \
+          grep -A14 -B3 'case dhd_pktfwd_req_assoc_sta_e' "$SRC" \
             | tee /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
-
-          grep -q 'param2 == WLC_E_ASSOC_IND' \
-            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-          grep -q 'param2 == WLC_E_REASSOC_IND' \
-            release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          grep -q 'param2 == WLC_E_ASSOC_IND' "$SRC"
+          grep -q 'param2 == WLC_E_REASSOC' "$SRC"
+          grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
       - name: Build GT-BE19000AI
         shell: bash
@@ -106,6 +120,7 @@ jobs:
           ls -lh ./*_emmc_squashfs.pkgtb
 
       - name: Upload patched firmware
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: GT-BE19000AI-pktfwd-patched-${{ github.run_number }}
