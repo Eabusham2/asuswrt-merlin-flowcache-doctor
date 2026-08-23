@@ -22,7 +22,8 @@ jobs:
     timeout-minutes: 360
     container:
       image: gnuton/asuswrt-merlin-toolchains-docker:latest
-      options: --user root
+      # Broadcom's prebuild_checks.mk intentionally aborts root builds.
+      options: --user docker
       volumes:
         - /mnt:/project
 
@@ -31,10 +32,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Match the known-working Gnuton Actions pattern: run as docker, then
+          # use sudo only to repair ownership of mounted/build directories.
+          sudo chown -R docker:docker /github/home /home/docker /project
           mkdir -p /project/artifacts
           echo "Disk before build:"
           df -h / /mnt /project
           id
+          test "$(id -u)" -ne 0
+          test "$(whoami)" = docker
 
       - name: Fetch exact GT-BE19000AI Merlin source
         shell: bash
@@ -128,10 +134,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test "$(id -u)" -ne 0
           export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
+          sudo ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
           cd /project/merlin/release/src-rt-5.04behnd.4916
 
+          echo "Builder identity:"
+          id
           echo "Toolchain PATH checks:"
           command -v aarch64-buildroot-linux-gnu-gcc || true
           command -v arm-buildroot-linux-gnueabi-gcc || true
