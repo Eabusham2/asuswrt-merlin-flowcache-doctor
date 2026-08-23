@@ -1,6 +1,6 @@
 #!/bin/sh
 # Automatic per-client Runner hardware-flow repair for Broadcom Wi-Fi 7/MLO lifecycle races.
-# Watches wlceventd's event log and invalidates only the affected client's HW-offloaded flows.
+# Watches association events plus GT-BE19000AI kernel SBF reinit events and invalidates only the affected client's HW flows.
 
 LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
 [ -r "$LIB" ] || exit 1
@@ -9,6 +9,7 @@ LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
 FCD_MLO_HW_HEAL=${FCD_MLO_HW_HEAL:-1}
 FCD_MLO_HW_SETTLE=${FCD_MLO_HW_SETTLE:-3}
 FCD_MLO_HW_COOLDOWN=${FCD_MLO_HW_COOLDOWN:-60}
+FCD_MLO_KERNEL_EVENTS=${FCD_MLO_KERNEL_EVENTS:-1}
 EVLOG=${FCD_WIFI_EVENT_LOG:-/jffs/wifi_wlc.log}
 STATE="$FCD_STATE/mlo-hw"
 PIDFILE="$STATE/pid"
@@ -111,9 +112,26 @@ queue_heal(){ # mac reason
   ( sleep "$FCD_MLO_HW_SETTLE"; heal_one "$_m" "$_now" "$_reason" ) &
 }
 
+handle_line(){
+  _line=$1; _type=; _mac=
+  case "$_line" in
+    *": ReAssoc "*Successful*) _type=reassoc;;
+    *": Deauth_ind "*) _type=deauth;;
+    *": Disassoc "*) _type=disassoc;;
+    *"SBF: dhd"*": INIT ["*"]"*) _type=sbf-init;;
+  esac
+  [ -n "$_type" ] || return 0
+  _mac=$(printf '%s\n' "$_line" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -1 | tr 'A-F' 'a-f')
+  fcd_valid_mac "$_mac" || return 0
+  queue_heal "$_mac" "$_type"
+}
+
 daemon(){
   [ "$FCD_MLO_HW_HEAL" = "1" ] || fcd_log MLO-HW-AUDIT "automatic hardware healing disabled"
-  [ -f "$EVLOG" ] || { fcd_log WARN "MLO-HW event-log-missing path=$EVLOG"; exit 1; }
+  if [ ! -f "$EVLOG" ] && { [ "$FCD_MLO_KERNEL_EVENTS" != "1" ] || ! command -v logread >/dev/null 2>&1; }; then
+    fcd_log WARN "MLO-HW no event source available"
+    exit 1
+  fi
   if ! mkdir "$LOCK" 2>/dev/null; then
     _p=$(cat "$PIDFILE" 2>/dev/null)
     [ -n "$_p" ] && [ -d "/proc/$_p" ] && exit 0
@@ -121,25 +139,24 @@ daemon(){
     mkdir "$LOCK" 2>/dev/null || exit 1
   fi
   printf '%s\n' $$ > "$PIDFILE"
-  FIFO="$STATE/events.fifo"; TAILPID=
-  cleanup(){ [ -n "$TAILPID" ] && kill "$TAILPID" 2>/dev/null; rm -f "$FIFO" "$PIDFILE"; rmdir "$LOCK" 2>/dev/null; }
+  FIFO="$STATE/events.fifo"; TAILPID=; LOGPID=
+  cleanup(){
+    [ -n "$TAILPID" ] && kill "$TAILPID" 2>/dev/null
+    [ -n "$LOGPID" ] && kill "$LOGPID" 2>/dev/null
+    rm -f "$FIFO" "$PIDFILE"
+    rmdir "$LOCK" 2>/dev/null
+  }
   trap cleanup EXIT INT TERM
   rm -f "$FIFO"
   mkfifo "$FIFO" 2>/dev/null || mknod "$FIFO" p 2>/dev/null || exit 1
-  tail -n 0 -F "$EVLOG" > "$FIFO" 2>/dev/null & TAILPID=$!
-  fcd_log START "mlo-runner-heal pid=$$ settle=${FCD_MLO_HW_SETTLE}s cooldown=${FCD_MLO_HW_COOLDOWN}s"
+  [ -f "$EVLOG" ] && { tail -n 0 -F "$EVLOG" > "$FIFO" 2>/dev/null & TAILPID=$!; }
+  if [ "$FCD_MLO_KERNEL_EVENTS" = "1" ] && command -v logread >/dev/null 2>&1; then
+    logread -f > "$FIFO" 2>/dev/null & LOGPID=$!
+  fi
+  fcd_log START "mlo-runner-heal pid=$$ settle=${FCD_MLO_HW_SETTLE}s cooldown=${FCD_MLO_HW_COOLDOWN}s kernel=${FCD_MLO_KERNEL_EVENTS}"
 
   while IFS= read -r _line; do
-    _type=
-    case "$_line" in
-      *": ReAssoc "*Successful*) _type=reassoc;;
-      *": Deauth_ind "*) _type=deauth;;
-      *": Disassoc "*) _type=disassoc;;
-    esac
-    [ -n "$_type" ] || continue
-    _mac=$(printf '%s\n' "$_line" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -1 | tr 'A-F' 'a-f')
-    fcd_valid_mac "$_mac" || continue
-    queue_heal "$_mac" "$_type"
+    handle_line "$_line"
   done < "$FIFO"
 }
 
@@ -163,6 +180,7 @@ status(){
     echo "mlo-runner-heal: running pid=$_p"
     echo "settle: ${FCD_MLO_HW_SETTLE}s"
     echo "cooldown: ${FCD_MLO_HW_COOLDOWN}s"
+    echo "kernel-events: ${FCD_MLO_KERNEL_EVENTS}"
     echo "mode: $([ "$FCD_MLO_HW_HEAL" = 1 ] && echo automatic || echo audit)"
     return 0
   fi
