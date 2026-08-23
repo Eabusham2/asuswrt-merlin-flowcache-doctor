@@ -35,10 +35,13 @@ current_bss(){ # mac bsslist
 
 is_mlo_client(){ # mac bss bsslist
   _m=$(fcd_norm_mac "$1"); _b=$2; _bl=$3; _k=$(fcd_key "$_m")
-  # A previously confirmed MLO/EHT identity remains eligible even if it is between links now.
+  # A previously positively identified MLO/EHT identity remains eligible even if it is between links now.
   [ -f "$FCD_STATE/class/$_k.protected" ] && return 0
   _c=$(fcd_classify "$_m" "$_b" "$_bl")
-  case "$_c" in mlo-*) return 0;; *) return 1;; esac
+  case "$_c" in
+    mlo-sticky|mlo-multiradio|mlo-sta-info|mlo-or-eht|mlo-table|mlo-eml-capable) return 0;;
+    *) return 1;;
+  esac
 }
 
 heal_one(){ # mac event_epoch reason
@@ -73,9 +76,10 @@ heal_one(){ # mac event_epoch reason
   [ -n "$_bsslist" ] || { rmdir "$_lk" 2>/dev/null; trap - EXIT INT TERM; return 0; }
   _b=$(current_bss "$_m" $_bsslist 2>/dev/null)
 
-  # Only MLO/EHT identities are allowed through this special path. Legacy clients keep using fcd_safe_flush().
+  # Only positively identified MLO/EHT identities are allowed through this special path.
+  # Unknown/fallback and legacy clients are never hardware-flushed here.
   if ! is_mlo_client "$_m" "$_b" "$_bsslist"; then
-    fcd_log MLO-HW-SKIP "mac=$_m reason=not-mlo event=$_reason"
+    fcd_log MLO-HW-SKIP "mac=$_m reason=not-positive-mlo event=$_reason"
     rmdir "$_lk" 2>/dev/null
     trap - EXIT INT TERM
     return 0
