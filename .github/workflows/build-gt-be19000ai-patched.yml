@@ -6,7 +6,7 @@ on:
       merlin_ref:
         description: Merlin branch/tag/ref to build
         required: true
-        default: asuswrt6
+        default: 3006.102.8_4
         type: string
 
 permissions:
