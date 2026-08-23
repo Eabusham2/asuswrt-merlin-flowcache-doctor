@@ -4,6 +4,7 @@ ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 T=$(mktemp -d); trap 'rm -rf "$T" /jffs /tmp/flowcache-doctor' EXIT
 rm -rf /jffs /tmp/flowcache-doctor
 mkdir -p /jffs/scripts /jffs/configs "$T/bin"
+: > /jffs/wifi_wlc.log
 cat > "$T/bin/nvram" <<'EOS'
 #!/bin/sh
 [ "$1" = get ] && [ "$2" = jffs2_scripts ] && echo 1
@@ -55,13 +56,19 @@ chmod +x /jffs/scripts/roam-detect.sh
 printf '#!/bin/sh\ncru a roam-detect-wd "* * * * * /jffs/scripts/old"\n' > /jffs/scripts/services-start
 chmod +x /jffs/scripts/services-start
 busybox sh "$ROOT/install.sh"
-/jffs/scripts/roamctl status | grep -q '1.0.0-mlo-safe-auto'
+/jffs/scripts/roamctl status | grep -q '1.0.4-mlo-runner-heal'
 /jffs/scripts/roamctl health | grep -q healthy
+/jffs/scripts/fcd-mlo-runner-heal.sh status | grep -q 'running'
 [ ! -e /jffs/scripts/roam-detect.sh ]
 [ -x /jffs/scripts/fcd-daemon.sh ]
+[ -x /jffs/scripts/fcd-mlo-runner-heal.sh ]
 [ -f /jffs/scripts/flowcache-doctor.conf ]
 grep -q 'FCD_CONFIRMATIONS=5' /jffs/scripts/flowcache-doctor.conf
-grep -q 'FCD_LOG_RETENTION_DAYS=30' /jffs/scripts/flowcache-doctor.conf
+grep -q 'FCD_MLO_HW_HEAL=1' /jffs/scripts/flowcache-doctor.conf
+grep -q 'FCD_MLO_HW_SETTLE=3' /jffs/scripts/flowcache-doctor.conf
+grep -q 'flowcache-doctor-mlo-hw-watchdog' "$T/cron"
+grep -q 'fcd-mlo-runner-heal.sh start' /jffs/scripts/services-start
 /jffs/scripts/roamctl uninstall
 [ ! -e /jffs/scripts/fcd-daemon.sh ]
+[ ! -e /jffs/scripts/fcd-mlo-runner-heal.sh ]
 echo 'PASS installer lifecycle'
