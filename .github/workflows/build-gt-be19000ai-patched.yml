@@ -51,7 +51,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          SRC=/project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          REL=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          SRC=/project/merlin/$REL
           printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
 
           python3 - "$SRC" <<'PY'
@@ -79,7 +80,8 @@ jobs:
 
           cd /project/merlin
           git diff --check
-          git diff -- "$SRC" | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          git diff -- "$REL" | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          test -s /project/artifacts/APPLIED_SOURCE_DIFF.patch
           sha256sum /project/artifacts/APPLIED_SOURCE_DIFF.patch | tee /project/artifacts/PATCH_SHA256.txt
 
           grep -A14 -B3 'case dhd_pktfwd_req_assoc_sta_e' "$SRC" \
