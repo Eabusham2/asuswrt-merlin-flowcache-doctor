@@ -38,15 +38,10 @@ def bcond_target(pc, word, expected_cond):
     return pc + imm19 * 4
 
 
-# Events 7..10 enter the shared assoc/reassoc block.
-assert bcond_target(0x16C, mod.PATCHED[0x16C], 0x9) == 0x224  # b.ls
-# Non-assoc, non-disassoc-indication returns through the original zero-return path.
-assert bcond_target(0x174, mod.PATCHED[0x174], 0x1) == 0x144  # b.ne
-# DISASSOC_IND decrements, then returns through the original common return.
+assert bcond_target(0x16C, mod.PATCHED[0x16C], 0x9) == 0x224
+assert bcond_target(0x174, mod.PATCHED[0x174], 0x1) == 0x144
 assert b_target(0x188, mod.PATCHED[0x188]) == 0x118
-# In the assoc range, only event 8 increments; 7/9/10 skip to stale-D3LUT delete.
-assert bcond_target(0x228, mod.PATCHED[0x228], 0x1) == 0x23C  # b.ne
-# Event 8 increments and then reaches the exact same stale-D3LUT delete block.
+assert bcond_target(0x228, mod.PATCHED[0x228], 0x1) == 0x23C
 assert b_target(0x238, mod.PATCHED[0x238]) == 0x23C
 
 required = ["events 7,8,9,10", "event 8", "event 12", "zero return value"]
@@ -58,7 +53,7 @@ def align(value, boundary):
     return (value + boundary - 1) & ~(boundary - 1)
 
 
-def synthetic_elf():
+def synthetic_elf(section_name=".text"):
     """Build a tiny ELF64/AArch64 ET_REL with the audited function signature."""
     text_size = max(mod.ORIGINAL) + 4
     text = bytearray(text_size)
@@ -66,11 +61,14 @@ def synthetic_elf():
         struct.pack_into("<I", text, rel, word)
 
     strtab = b"\0dhd_pktfwd_request\0"
-    shstr = b"\0.text\0.symtab\0.strtab\0.shstrtab\0"
+    shstr = b"\0" + section_name.encode() + b"\0.symtab\0.strtab\0.shstrtab\0"
+    text_name = 1
+    symtab_name = text_name + len(section_name) + 1
+    strtab_name = symtab_name + len(".symtab") + 1
+    shstrtab_name = strtab_name + len(".strtab") + 1
     text_off = 0x100
     symtab_off = align(text_off + len(text), 8)
 
-    # ELF64 symbol table: null symbol + one global function symbol.
     symtab = bytearray(48)
     struct.pack_into("<IBBHQQ", symtab, 24, 1, 0x12, 0, 1, 0, text_size)
 
@@ -81,16 +79,16 @@ def synthetic_elf():
 
     ident = bytearray(16)
     ident[:4] = b"\x7fELF"
-    ident[4] = 2  # ELFCLASS64
-    ident[5] = 1  # little-endian
-    ident[6] = 1  # EV_CURRENT
+    ident[4] = 2
+    ident[5] = 1
+    ident[6] = 1
     struct.pack_into(
         "<16sHHIQQQIHHHHHH",
         out,
         0,
         bytes(ident),
-        1,      # ET_REL
-        183,    # EM_AARCH64
+        1,
+        183,
         1,
         0,
         0,
@@ -110,20 +108,18 @@ def synthetic_elf():
     out[shstr_off:shstr_off + len(shstr)] = shstr
 
     shfmt = "<IIQQQQIIQQ"
-    names = {".text": 1, ".symtab": 7, ".strtab": 15, ".shstrtab": 23}
     headers = [
         (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        (names[".text"], 1, 0x6, 0, text_off, len(text), 0, 0, 4, 0),
-        (names[".symtab"], 2, 0, 0, symtab_off, len(symtab), 3, 1, 8, 24),
-        (names[".strtab"], 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
-        (names[".shstrtab"], 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0),
+        (text_name, 1, 0x6, 0, text_off, len(text), 0, 0, 4, 0),
+        (symtab_name, 2, 0, 0, symtab_off, len(symtab), 3, 1, 8, 24),
+        (strtab_name, 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
+        (shstrtab_name, 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0),
     ]
     for i, header in enumerate(headers):
         struct.pack_into(shfmt, out, shoff + i * 64, *header)
     return bytes(out)
 
 
-# Exercise the actual CLI/parser/writer end to end without storing Broadcom binaries.
 with tempfile.TemporaryDirectory() as tmpdir:
     tmp = Path(tmpdir)
     elf = tmp / "dhd.o"
@@ -157,13 +153,12 @@ with tempfile.TemporaryDirectory() as tmpdir:
     assert verify["state_after"] == "patched"
     assert verify["changed"] is False
 
-    function_off, _, _ = mod.locate_symbol(patched)
+    function_off, *_ = mod.locate_symbol(patched)
     assert mod.state_of(mod.read_words(patched, function_off)) == "patched"
 
-    # Fail closed: an unknown instruction signature must be rejected byte-for-byte.
     unknown = tmp / "unknown.o"
     bad = bytearray(original)
-    original_off, _, _ = mod.locate_symbol(original)
+    original_off, *_ = mod.locate_symbol(original)
     struct.pack_into("<I", bad, original_off + 0x160, 0)
     unknown.write_bytes(bad)
     before = unknown.read_bytes()
@@ -177,4 +172,15 @@ with tempfile.TemporaryDirectory() as tmpdir:
     assert "signature is unknown" in proc.stdout
     assert unknown.read_bytes() == before, "refused patch must not mutate the object"
 
-print("PASS DHD binary patch revision 2 control-flow + synthetic ELF patch/verify/refusal contract")
+    # Prebuilt relocatable objects may use function-specific text sections.
+    subsection = tmp / "subsection.o"
+    subsection.write_bytes(synthetic_elf(".text.dhd_pktfwd_request"))
+    subprocess.run(
+        [sys.executable, str(mod_path), "patch", str(subsection)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    sub_off, *_ = mod.locate_symbol(subsection.read_bytes())
+    assert mod.state_of(mod.read_words(subsection.read_bytes(), sub_off)) == "patched"
+
+print("PASS DHD binary patch revision 2 control-flow + ELF patch/verify/refusal/text-subsection contract")
