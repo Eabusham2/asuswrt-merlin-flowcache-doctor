@@ -21,13 +21,15 @@ RING="$STATE/dropwatch-ring.tsv"
 LAST_EVENT="$STATE/dropwatch-last-event"
 
 num_ok(){ case "$1" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
-for V in INTERVAL UTIL_HIGH RING_LINES COOLDOWN RETENTION_DAYS; do
-  eval X=\$$V
-  num_ok "$X" || eval "$V=2"
-done
+num_ok "$INTERVAL" || INTERVAL=2
+num_ok "$UTIL_HIGH" || UTIL_HIGH=94
+num_ok "$RING_LINES" || RING_LINES=240
+num_ok "$COOLDOWN" || COOLDOWN=120
+num_ok "$RETENTION_DAYS" || RETENTION_DAYS=30
 [ "$INTERVAL" -ge 1 ] || INTERVAL=2
 [ "$UTIL_HIGH" -ge 1 ] && [ "$UTIL_HIGH" -le 100 ] || UTIL_HIGH=94
 [ "$RING_LINES" -ge 60 ] || RING_LINES=240
+[ "$COOLDOWN" -ge 1 ] || COOLDOWN=120
 [ "$RETENTION_DAYS" -ge 1 ] || RETENTION_DAYS=30
 
 list_pids(){
