@@ -15,9 +15,14 @@ Make the stale-entry invalidation cover all association and reassociation
 request/indication events. dhd_pktfwd_lut_del() is already tolerant of a
 missing entry, so this is idempotent.
 
+NOTE: On GT-BE19000AI current Merlin builds, DHD links a prebuilt whole
+`dhd.o`, so this source patch documents intended semantics but is not by
+itself the effective firmware patch. The GitHub Actions workflow patches
+and verifies the actual prebuilt DHD binary and final dhd.ko.
+
 --- a/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
 +++ b/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-@@
+@@ -1109,8 +1109,11 @@ dhd_pktfwd_request(int request, unsigned long param0,
  	case dhd_pktfwd_req_assoc_sta_e:	/* param0: d3addr, param1: 0|1 assoc */
  		/* param2: eventtype */
 -		if (param2 == WLC_E_ASSOC) {
