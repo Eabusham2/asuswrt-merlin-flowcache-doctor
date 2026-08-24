@@ -9,67 +9,50 @@ import struct
 SYMBOL = "dhd_pktfwd_request"
 EM_AARCH64 = 183
 ET_REL = 1
+SHT_PROGBITS = 1
+SHF_EXECINSTR = 0x4
 PATCH_REVISION = 2
 
-# Relative instruction offsets inside dhd_pktfwd_request.
-# This exact signature is intentionally narrow: if Broadcom changes the
-# function, the tool refuses to patch rather than guessing.
-#
-# The patch has two coordinated pieces:
-#   1. request-5/event dispatch at 0x160..0x18c
-#   2. the former ASSOC_IND station-increment block at 0x224..0x238
-#
-# Revision 2 deliberately preserves the original x20=0 return-value setup on
-# every request-5 path.  Revision 1 did not preserve that invariant and must
-# never be considered flashable.
 ORIGINAL = {
-    0x160: 0xF1001C7F,  # cmp x3, #7
-    0x164: 0x540006C0,  # b.eq stale_lut_delete
-    0x168: 0xF100207F,  # cmp x3, #8
-    0x16C: 0x540005C0,  # b.eq station_inc
-    0x170: 0xF100307F,  # cmp x3, #12
-    0x174: 0xD2800014,  # mov x20, #0
-    0x178: 0x54FFFE61,  # b.ne return_zero
-    0x17C: 0xB9401A60,  # ldr w0, [x19, #0x18]
-    0x180: 0x51000400,  # sub w0, w0, #1
-    0x184: 0xB9001A60,  # str w0, [x19, #0x18]
-    0x188: 0xA9425BF5,  # ldp x21, x22, [sp, #0x20]
-    0x18C: 0x17FFFFE3,  # b common_return
-    0x224: 0xB9401A60,  # station_inc: ldr w0, [x19, #0x18]
-    0x228: 0xD2800014,  # mov x20, #0
-    0x22C: 0x11000400,  # add w0, w0, #1
-    0x230: 0xB9001A60,  # str w0, [x19, #0x18]
-    0x234: 0xA9425BF5,  # ldp x21, x22, [sp, #0x20]
-    0x238: 0x17FFFFB8,  # b common_return
+    0x160: 0xF1001C7F,
+    0x164: 0x540006C0,
+    0x168: 0xF100207F,
+    0x16C: 0x540005C0,
+    0x170: 0xF100307F,
+    0x174: 0xD2800014,
+    0x178: 0x54FFFE61,
+    0x17C: 0xB9401A60,
+    0x180: 0x51000400,
+    0x184: 0xB9001A60,
+    0x188: 0xA9425BF5,
+    0x18C: 0x17FFFFE3,
+    0x224: 0xB9401A60,
+    0x228: 0xD2800014,
+    0x22C: 0x11000400,
+    0x230: 0xB9001A60,
+    0x234: 0xA9425BF5,
+    0x238: 0x17FFFFB8,
 }
 
 PATCHED = {
-    # Keep the original request-5 return value deterministic before any
-    # event dispatch.  x0 is free here because the request selector in w0
-    # has already selected this switch case.
-    0x160: 0xD2800014,  # mov x20, #0
-    0x164: 0xD1001C60,  # sub x0, x3, #7
-    0x168: 0xF1000C1F,  # cmp x0, #3
-    0x16C: 0x540005C9,  # b.ls assoc_range (events 7..10) -> 0x224
-    0x170: 0xF100307F,  # cmp x3, #12
-    0x174: 0x54FFFE81,  # b.ne return_zero -> 0x144
-    0x178: 0xB9401A60,  # event 12: ldr w0, [x19, #0x18]
-    0x17C: 0x51000400,  # sub w0, w0, #1
-    0x180: 0xB9001A60,  # str w0, [x19, #0x18]
-    0x184: 0xA9425BF5,  # ldp x21, x22, [sp, #0x20]
-    0x188: 0x17FFFFE4,  # b common_return -> 0x118
-    0x18C: 0xD503201F,  # nop
-
-    # All association/reassociation events 7..10 arrive here.  Preserve the
-    # original station-count increment only for event 8 (ASSOC_IND), then
-    # fall into the existing stale-D3LUT delete block.  Events 7/9/10 skip
-    # the increment and go straight to that same delete block.
-    0x224: 0xF100207F,  # cmp x3, #8
-    0x228: 0x540000A1,  # b.ne stale_lut_delete -> 0x23c
-    0x22C: 0xB9401A60,  # ldr w0, [x19, #0x18]
-    0x230: 0x11000400,  # add w0, w0, #1
-    0x234: 0xB9001A60,  # str w0, [x19, #0x18]
-    0x238: 0x14000001,  # b stale_lut_delete -> 0x23c
+    0x160: 0xD2800014,
+    0x164: 0xD1001C60,
+    0x168: 0xF1000C1F,
+    0x16C: 0x540005C9,
+    0x170: 0xF100307F,
+    0x174: 0x54FFFE81,
+    0x178: 0xB9401A60,
+    0x17C: 0x51000400,
+    0x180: 0xB9001A60,
+    0x184: 0xA9425BF5,
+    0x188: 0x17FFFFE4,
+    0x18C: 0xD503201F,
+    0x224: 0xF100207F,
+    0x228: 0x540000A1,
+    0x22C: 0xB9401A60,
+    0x230: 0x11000400,
+    0x234: 0xB9001A60,
+    0x238: 0x14000001,
 }
 
 SEMANTICS = (
@@ -112,12 +95,11 @@ def locate_symbol(data: bytes):
         off = e_shoff + i * e_shentsize
         if off + 64 > len(data):
             raise ValueError("ELF section table extends past EOF")
-        fields = struct.unpack_from(shfmt, data, off)
+        f = struct.unpack_from(shfmt, data, off)
         sections.append({
-            "name_off": fields[0], "type": fields[1], "flags": fields[2],
-            "addr": fields[3], "offset": fields[4], "size": fields[5],
-            "link": fields[6], "info": fields[7], "align": fields[8],
-            "entsize": fields[9],
+            "name_off": f[0], "type": f[1], "flags": f[2],
+            "addr": f[3], "offset": f[4], "size": f[5],
+            "link": f[6], "info": f[7], "align": f[8], "entsize": f[9],
         })
 
     shstr = sections[e_shstrndx]
@@ -131,6 +113,7 @@ def locate_symbol(data: bytes):
     symtab = symtabs[0]
     if not (0 <= symtab["link"] < len(sections)):
         raise ValueError("invalid .symtab string-table link")
+
     strsec = sections[symtab["link"]]
     strdata = data[strsec["offset"]:strsec["offset"] + strsec["size"]]
     entsize = symtab["entsize"] or 24
@@ -149,21 +132,29 @@ def locate_symbol(data: bytes):
 
     if len(found) != 1:
         raise ValueError(f"expected exactly one {SYMBOL} symbol, found {len(found)}")
+
     st_shndx, st_value, st_size, _ = found[0]
     if not (0 < st_shndx < len(sections)):
         raise ValueError(f"{SYMBOL} has invalid section index {st_shndx}")
     sec = sections[st_shndx]
-    if sec["name"] != ".text":
-        raise ValueError(f"{SYMBOL} is in {sec['name']}, expected .text")
+
+    if sec["type"] != SHT_PROGBITS or not (sec["flags"] & SHF_EXECINSTR):
+        raise ValueError(
+            f"{SYMBOL} is in non-executable section {sec['name']} "
+            f"(type={sec['type']} flags=0x{sec['flags']:x})"
+        )
+    if not sec["name"].startswith(".text"):
+        raise ValueError(f"{SYMBOL} is in unexpected executable section {sec['name']}")
+
     rel = st_value - sec["addr"]
     if rel < 0 or rel + st_size > sec["size"]:
-        raise ValueError(f"{SYMBOL} bounds are outside .text")
+        raise ValueError(f"{SYMBOL} bounds are outside {sec['name']}")
     fileoff = sec["offset"] + rel
     if fileoff + st_size > len(data):
         raise ValueError(f"{SYMBOL} extends past EOF")
     if st_size < max(PATCHED) + 4:
         raise ValueError(f"{SYMBOL} is too small ({st_size} bytes)")
-    return fileoff, st_value, st_size
+    return fileoff, st_value, st_size, sec["name"]
 
 
 def read_words(data: bytes, function_file_offset: int):
@@ -197,7 +188,7 @@ def main():
     path = Path(args.elf)
     raw = path.read_bytes()
     before_sha = sha256(raw)
-    function_off, _, _ = locate_symbol(raw)
+    function_off, _, _, _ = locate_symbol(raw)
     before_words = read_words(raw, function_off)
     before_state = state_of(before_words)
 
@@ -227,7 +218,7 @@ def main():
 
     after = path.read_bytes()
     after_sha = sha256(after)
-    after_off, after_symbol_value, after_symbol_size = locate_symbol(after)
+    after_off, after_symbol_value, after_symbol_size, after_section_name = locate_symbol(after)
     after_words = read_words(after, after_off)
     after_state = state_of(after_words)
 
@@ -242,6 +233,7 @@ def main():
         "symbol": SYMBOL,
         "symbol_value": f"0x{after_symbol_value:x}",
         "symbol_size": after_symbol_size,
+        "symbol_section": after_section_name,
         "function_file_offset": f"0x{after_off:x}",
         "state_before": before_state,
         "state_after": after_state,
