@@ -37,6 +37,21 @@ The effective workflow now:
 
 A future stable release with an unknown DHD binary signature fails **before the long compile** rather than being patched by assumption.
 
+### Binary patch revision requirement
+
+**Revision 1 is permanently invalid and must never be flashed.** A later audit against the real run-#7 `dhd.ko` showed that the first binary transformation overwrote the original request-5 `mov x20,#0` return-value initialization. Revision 2 fixes that by preserving the zero-return invariant while keeping the intended lifecycle behavior:
+
+```text
+WLC_E_ASSOC (7)        -> stale D3LUT delete
+WLC_E_ASSOC_IND (8)    -> station count +1, then stale D3LUT delete
+WLC_E_REASSOC (9)      -> stale D3LUT delete
+WLC_E_REASSOC_IND (10) -> stale D3LUT delete
+WLC_E_DISASSOC_IND (12)-> station count -1
+other request-5 events -> original zero-return path
+```
+
+`tests/test-dhd-binary-patch.py` checks those exact branch destinations and the zero-return invariant without storing Broadcom proprietary binaries in the repository.
+
 ## Run it
 
 1. Open this repository on GitHub.
@@ -49,32 +64,32 @@ A future stable release with an unknown DHD binary signature fails **before the 
 8. Download `GT-BE19000AI-<resolved version>-pktfwd-patched-<run number>`.
 9. Unzip it on the Mac.
 
-Do **not** use **Re-run jobs** on an older workflow run after the workflow file itself has changed. Start a brand-new manual run from current `main`.
+Do **not** use **Re-run jobs** on an older workflow run after the workflow or binary-patch tool has changed. Start a brand-new manual run from current `main`.
 
 ## Required artifact proof
 
-Do not approve an artifact merely because the workflow badge is green. Open `FLASH_MANIFEST.txt` and require both:
+Do not approve an artifact merely because the workflow badge is green. Open `FLASH_MANIFEST.txt` and require:
 
 ```text
 VERIFIED_FOR_FLASH=YES
 DHD_BINARY_PATCH_VERIFIED=YES
-```
-
-It must also identify:
-
-```text
 PATCH_METHOD=verified-prebuilt-dhd-binary
+DHD_BINARY_PATCH_REVISION=2
 ```
+
+Also inspect `DHD_PREBUILT_VERIFY.json` and `DHD_FINAL_MODULE_VERIFICATION.json`; both must report `state_after` as `patched` and `patch_revision` as `2`.
 
 The artifact includes the normal firmware PKGTB, firmware SHA-256, release resolution/provenance, source-reference diff, prebuilt-DHD binary patch reports, final `dhd.ko` inspection/verification reports, build exit code, and build log.
 
 Run #7 (`GT-BE19000AI-3006.102.8_4-pktfwd-patched-7`) must **not** be flashed as the PKTFWD fix. Its build and firmware hash were valid, but artifact audit proved the normal build linked prebuilt DHD while the workflow had only edited the source file. It predates the mandatory final-DHD binary verification gate.
 
+Any artifact created with binary patch revision 1 must also **not** be flashed, regardless of whether its packaging/build checks passed.
+
 ## What file do I upload to the router?
 
 GitHub gives you a ZIP **artifact**. The ZIP itself is not router firmware.
 
-Unzip it, verify the manifest gates above, then upload only the normal generated file ending in:
+Unzip it, verify the manifest/report gates above, then upload only the normal generated file ending in:
 
 `_emmc_squashfs.pkgtb`
 
@@ -84,7 +99,7 @@ Do not upload `_loader.pkgtb` for a normal firmware upgrade. Do not rename the i
 
 Before flashing, back up the router configuration and JFFS.
 
-Only after the artifact passes both manifest gates, open **Administration > Firmware Upgrade**, manually upload the normal `*_emmc_squashfs.pkgtb`, and let the router reboot normally.
+Only after the artifact passes all manifest/report gates, open **Administration > Firmware Upgrade**, manually upload the normal `*_emmc_squashfs.pkgtb`, and let the router reboot normally.
 
 This remains an experimental custom datapath patch. CI proves exactly what binary was built; live router behavior must still be validated after flashing.
 
