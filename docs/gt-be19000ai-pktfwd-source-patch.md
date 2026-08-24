@@ -1,48 +1,14 @@
-# GT-BE19000AI PKTFWD reassociation invalidation patch
+# GT-BE19000AI PKTFWD reassociation invalidation fix
 
-This is a source-level patch for the GT-BE19000AI Broadcom DHD/PKTFWD path. It is **not** a runtime `fcctl` workaround.
+This project fixes the GT-BE19000AI Broadcom DHD/PKTFWD association/reassociation invalidation gap. It is **not** a runtime `fcctl` workaround.
 
 ## Why it exists
 
-The DHD connect path handles association/reassociation events including `WLC_E_ASSOC`, `WLC_E_ASSOC_IND`, `WLC_E_REASSOC`, and `WLC_E_REASSOC_IND`. The shared PKTFWD request handler currently removes potentially stale D3LUT state only for `WLC_E_ASSOC`.
+The DHD connect path handles association/reassociation events including `WLC_E_ASSOC`, `WLC_E_ASSOC_IND`, `WLC_E_REASSOC`, and `WLC_E_REASSOC_IND`. The shared PKTFWD request handler removes potentially stale D3LUT state only for `WLC_E_ASSOC`.
 
-On an AP/MLO client, `ASSOC_IND`/`REASSOC_IND` are normal lifecycle events. If an old station/link incarnation remains in D3LUT, the new association can reuse stale PKTFWD radio/flowring state, which FlowCache/Runner may then accelerate.
+On an AP/MLO client, `ASSOC_IND`/`REASSOC_IND` are normal lifecycle events. If an old station/link incarnation remains in D3LUT, a new association can reuse stale PKTFWD radio/flowring state that FlowCache/Runner may then accelerate.
 
-The patch makes that cleanup idempotently run for all association/reassociation request and indication events.
-
-Patch file:
-
-`patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch`
-
-## Important
-
-You cannot apply this to the running router filesystem. `dhd_pktfwd.c` is firmware/driver source. The patched code must be compiled into a custom GT-BE19000AI Asuswrt-Merlin image and that image flashed normally.
-
-For GT-BE19000AI, Merlin's current build script uses:
-
-- branch: `asuswrt6`
-- SDK: `release/src-rt-5.04behnd.4916`
-- make target: `gt-be19000ai`
-- image: `image/*_emmc_squashfs.pkgtb`
-
-## Apply the patch to a Merlin source tree
-
-Run this on an x86-64 Linux machine/VM with a working Asuswrt-Merlin build environment and GitHub CLI installed:
-
-```sh
-gh repo clone RMerl/asuswrt-merlin.ng merlin -- --branch asuswrt6 --single-branch
-cd merlin
-
-gh api repos/Eabusham2/asuswrt-merlin-flowcache-doctor/contents/patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch \
-  --jq .content | base64 -d > /tmp/gt-be19000ai-pktfwd.patch
-
-git apply --check /tmp/gt-be19000ai-pktfwd.patch
-git apply /tmp/gt-be19000ai-pktfwd.patch
-git diff --check
-git diff -- release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-```
-
-The expected source change is that the stale D3LUT deletion gate changes from only `WLC_E_ASSOC` to:
+The intended semantics are:
 
 ```c
 if ((param2 == WLC_E_ASSOC) ||
@@ -53,55 +19,97 @@ if ((param2 == WLC_E_ASSOC) ||
 }
 ```
 
-## Build GT-BE19000AI
+`WLC_E_ASSOC_IND` must still increment PKTFWD's station count, and `WLC_E_DISASSOC_IND` must still decrement it.
 
-From the patched tree:
+## Critical GT-BE19000AI build detail
 
-```sh
-cd release/src-rt-5.04behnd.4916
-make gt-be19000ai
-```
+For the current GT-BE19000AI Merlin codebase, editing `dhd_pktfwd.c` is **not sufficient** to change the firmware.
 
-If successful, locate the image with:
+The model's `hnd_dhd/Makefile` selects `REBUILD_DHD_MODULE=0` when full DHD source is unavailable and links a prebuilt whole `dhd.o`. Merlin's platform preparation copies that object from:
 
-```sh
-ls -lh image/*_emmc_squashfs.pkgtb
-sha256sum image/*_emmc_squashfs.pkgtb
-```
+`release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o`
 
-## Flash
+into the DHD prebuilt build path. A normal build then links `dhd.ko` from that object without compiling `shared/impl1/dhd_pktfwd.c`.
 
-1. Save the current router configuration/JFFS backup first.
-2. Open ASUS/Merlin **Administration > Firmware Upgrade**.
-3. Manually upload the generated `*_emmc_squashfs.pkgtb` image.
-4. Let the router reboot normally.
-5. Do not restore an unrelated/older settings backup unless needed.
+This was proven by auditing green firmware run #7: its build log showed `module : 0`, then `LD ... hnd_dhd/dhd.o` and `LD ... hnd_dhd/dhd.ko`, with no compile of `dhd_pktfwd.c`.
 
-A normal same-codebase custom Merlin build should preserve settings, but keep a recovery path available because this is an experimental driver/datapath source change.
+Therefore:
 
-## Verify the patch is in the source before flashing
+- `patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch` is the human-readable source-reference patch;
+- `tools/patch_dhd_pktfwd_prebuilt.py` is the effective current GT-BE19000AI build patcher;
+- final firmware is approved only after the final installed `dhd.ko` independently verifies the patched instruction signature.
+
+## Effective binary patch
+
+`tools/patch_dhd_pktfwd_prebuilt.py` parses the AArch64 ELF metadata, locates the `dhd_pktfwd_request` symbol, and checks an exact set of instruction words at function-relative offsets. It has three modes:
 
 ```sh
-grep -A10 -B3 'case dhd_pktfwd_req_assoc_sta_e' \
-  release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+python3 tools/patch_dhd_pktfwd_prebuilt.py inspect dhd.o
+python3 tools/patch_dhd_pktfwd_prebuilt.py patch dhd.o
+python3 tools/patch_dhd_pktfwd_prebuilt.py verify dhd.o
 ```
 
-You should see all four `WLC_E_*ASSOC*` checks above.
+The patcher refuses `unknown` signatures. It does not pattern-scan arbitrary bytes, change file size, or blindly apply offsets to an unrecognized future DHD build.
 
-## Revert the source patch
+For the verified current signature, the resulting control flow is:
 
-Before building, if you want to undo only this source change:
+- event 7 / `WLC_E_ASSOC` → stale D3LUT delete;
+- event 8 / `WLC_E_ASSOC_IND` → station-count increment, then stale D3LUT delete;
+- event 9 / `WLC_E_REASSOC` → stale D3LUT delete;
+- event 10 / `WLC_E_REASSOC_IND` → stale D3LUT delete;
+- event 12 / `WLC_E_DISASSOC_IND` → station-count decrement;
+- other event types retain the original path.
 
-```sh
-git apply -R /tmp/gt-be19000ai-pktfwd.patch
+## GitHub Actions build
+
+Use `.github/workflows/build-gt-be19000ai-patched.yml` rather than manually applying the source patch and assuming it was compiled.
+
+The workflow:
+
+1. resolves the latest stable compatible GT-BE19000AI `asuswrt6` release;
+2. verifies model/source/prebuilt prerequisites;
+3. records the source-reference diff;
+4. patches and verifies the model-specific prebuilt `dhd.o`;
+5. runs `make gt-be19000ai`;
+6. captures the normal PKGTB from `targets/96813GW/`;
+7. finds `targets/96813GW/fs/lib/modules/*/extra/dhd.ko`;
+8. verifies the patched PKTFWD signature in that final module;
+9. emits `FLASH_MANIFEST.txt` only if all checks pass.
+
+The manifest must contain:
+
+```text
+VERIFIED_FOR_FLASH=YES
+DHD_BINARY_PATCH_VERIFIED=YES
+PATCH_METHOD=verified-prebuilt-dhd-binary
 ```
 
-Or discard the source file change:
+If those lines are absent, do not flash the artifact as this fix.
 
-```sh
-git restore release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-```
+## Source-reference patch
+
+The human-readable source patch can still be inspected or applied to a source tree for review:
+
+`patches/gt-be19000ai-pktfwd-reassoc-invalidation.patch`
+
+It documents the intended C behavior, but **source presence is not binary proof on this model**.
+
+## Output and flash
+
+A completed GT-BE19000AI build writes the normal firmware under:
+
+`release/src-rt-5.04behnd.4916/targets/96813GW/GT-BE19000AI_*_emmc_squashfs.pkgtb`
+
+Do not use the GitHub ZIP itself or `_loader.pkgtb` for a normal upgrade.
+
+After the artifact passes both manifest gates:
+
+1. back up router configuration and JFFS;
+2. open ASUS/Merlin **Administration > Firmware Upgrade**;
+3. upload only the normal `*_emmc_squashfs.pkgtb`;
+4. let the router reboot normally;
+5. validate Runner/WAN upload behavior live.
 
 ## Scope
 
-This patch prevents stale PKTFWD/D3LUT station state from surviving association/reassociation events. It does not modify RF settings, MLO policy, Runner enablement, QoS, DynBQ, or the proprietary Broadcom Wi-Fi firmware blob itself.
+The fix targets stale host-side DHD/PKTFWD D3LUT lifecycle state. It does not modify RF settings, MLO steering policy, Runner enablement, QoS, DynBQ, or the proprietary Wi-Fi dongle firmware (`rtecdc.bin`).
