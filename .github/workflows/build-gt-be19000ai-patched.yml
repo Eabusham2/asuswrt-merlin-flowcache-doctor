@@ -9,6 +9,7 @@ permissions:
 env:
   MERLIN_BRANCH: asuswrt6
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
+  DHD_BINARY_PATCH_REVISION: "2"
 
 jobs:
   build:
@@ -199,7 +200,7 @@ jobs:
           grep -q 'param2 == WLC_E_REASSOC' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
-      - name: Patch and verify effective prebuilt DHD binary
+      - name: Patch and verify effective prebuilt DHD binary revision 2
         shell: bash
         run: |
           set -euo pipefail
@@ -208,6 +209,7 @@ jobs:
 
           test -s "$TOOL"
           test -s "$DHD_PREBUILT"
+          python3 "$GITHUB_WORKSPACE/tests/test-dhd-binary-patch.py"
           sha256sum "$TOOL" > /project/artifacts/DHD_BINARY_PATCHER_SHA256.txt
           sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256_BEFORE.txt
 
@@ -217,12 +219,16 @@ jobs:
             --report /project/artifacts/DHD_PREBUILT_VERIFY.json
 
           sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256_AFTER.txt
-          python3 - /project/artifacts/DHD_PREBUILT_PATCH.json <<'PY'
+          python3 - /project/artifacts/DHD_PREBUILT_PATCH.json /project/artifacts/DHD_PREBUILT_VERIFY.json "$DHD_BINARY_PATCH_REVISION" <<'PY'
           import json, sys
-          report = json.load(open(sys.argv[1]))
-          if report.get("state_after") != "patched":
-              raise SystemExit("prebuilt DHD binary did not reach patched state")
-          print("effective prebuilt DHD patch verified")
+          expected = int(sys.argv[3])
+          for path in sys.argv[1:3]:
+              report = json.load(open(path))
+              if report.get("state_after") != "patched":
+                  raise SystemExit(f"{path}: prebuilt DHD binary did not reach patched state")
+              if report.get("patch_revision") != expected:
+                  raise SystemExit(f"{path}: expected patch revision {expected}, got {report.get('patch_revision')}")
+          print(f"effective prebuilt DHD patch revision {expected} verified")
           PY
 
       - name: Build GT-BE19000AI and preserve exit code
@@ -318,7 +324,7 @@ jobs:
           chmod -R a+rX /project/artifacts 2>/dev/null || true
           exit 0
 
-      - name: Verify successful flash build and final DHD binary
+      - name: Verify successful flash build and final DHD binary revision 2
         if: always()
         shell: bash
         run: |
@@ -349,21 +355,23 @@ jobs:
             --report /project/artifacts/DHD_FINAL_MODULE_VERIFICATION.json
           test -s DHD_FINAL_MODULE_VERIFICATION.json
 
-          python3 - DHD_PREBUILT_VERIFY.json DHD_FINAL_MODULE_VERIFICATION.json <<'PY'
+          python3 - DHD_PREBUILT_PATCH.json DHD_PREBUILT_VERIFY.json DHD_FINAL_MODULE_VERIFICATION.json "$DHD_BINARY_PATCH_REVISION" <<'PY'
           import json, sys
-          pre = json.load(open(sys.argv[1]))
-          final = json.load(open(sys.argv[2]))
-          if pre.get("state_after") != "patched":
-              raise SystemExit("effective prebuilt DHD object is not patched")
-          if final.get("state_after") != "patched":
-              raise SystemExit("final dhd.ko does not contain patched PKTFWD signature")
-          print("final DHD binary patch verified")
+          expected = int(sys.argv[4])
+          for path in sys.argv[1:4]:
+              report = json.load(open(path))
+              if report.get("state_after") != "patched":
+                  raise SystemExit(f"{path}: DHD binary is not patched")
+              if report.get("patch_revision") != expected:
+                  raise SystemExit(f"{path}: expected patch revision {expected}, got {report.get('patch_revision')}")
+          print(f"final DHD binary patch revision {expected} verified")
           PY
 
           printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
           {
             echo "VERIFIED_FOR_FLASH=YES"
             echo "DHD_BINARY_PATCH_VERIFIED=YES"
+            echo "DHD_BINARY_PATCH_REVISION=$DHD_BINARY_PATCH_REVISION"
             echo "PATCH_METHOD=verified-prebuilt-dhd-binary"
             echo "AUTO_RELEASE_SELECTION=YES"
             echo "RELEASE_POLICY=latest-stable-compatible"
