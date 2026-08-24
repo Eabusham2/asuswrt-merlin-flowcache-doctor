@@ -143,8 +143,6 @@ def locate_symbol(data: bytes):
             f"{SYMBOL} is in non-executable section {sec['name']} "
             f"(type={sec['type']} flags=0x{sec['flags']:x})"
         )
-    if not sec["name"].startswith(".text"):
-        raise ValueError(f"{SYMBOL} is in unexpected executable section {sec['name']}")
 
     rel = st_value - sec["addr"]
     if rel < 0 or rel + st_size > sec["size"]:
