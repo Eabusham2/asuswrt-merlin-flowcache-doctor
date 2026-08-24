@@ -7,13 +7,11 @@ permissions:
   contents: read
 
 env:
-  # GT-BE19000AI is maintained on Merlin's separate asuswrt6 lineage.
-  # This is the 20-Aug-2026 3006.102.8_4 release commit on that lineage.
-  # Upstream commit message mistakenly says _8_2, but its version.conf diff is 3 -> 4.
   MERLIN_BRANCH: asuswrt6
   MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
   EXPECTED_SERIALNO: "102.8"
   EXPECTED_EXTENDNO: "4"
+  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
 
 jobs:
   build:
@@ -22,8 +20,9 @@ jobs:
     timeout-minutes: 360
     container:
       image: gnuton/asuswrt-merlin-toolchains-docker:latest
-      # Broadcom's prebuild_checks.mk intentionally aborts root builds.
-      options: --user docker
+      # Keep Actions themselves root so upload-artifact can write runner command files.
+      # The Broadcom/Merlin compile is explicitly dropped to user docker below.
+      options: --user root
       volumes:
         - /mnt:/project
 
@@ -32,15 +31,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Match the known-working Gnuton Actions pattern: run as docker, then
-          # use sudo only to repair ownership of mounted/build directories.
-          sudo chown -R docker:docker /github/home /home/docker /project
           mkdir -p /project/artifacts
+          chown -R docker:docker /home/docker /project
+          echo "Job identity (expected root for Actions plumbing):"
+          id
           echo "Disk before build:"
           df -h / /mnt /project
-          id
-          test "$(id -u)" -ne 0
-          test "$(whoami)" = docker
 
       - name: Fetch exact GT-BE19000AI Merlin source
         shell: bash
@@ -69,14 +65,12 @@ jobs:
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
 
-          # Catch the exact mistake that previously produced "NO THIS TARGET gt-be19000ai".
           grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
           grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
           test -s "$MODEL_CFG"
           grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
 
-          # GT-BE19000AI-specific closed/prebuilt pieces expected by this tree.
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
 
@@ -130,43 +124,64 @@ jobs:
           grep -q 'param2 == WLC_E_REASSOC' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
-      - name: Build GT-BE19000AI
+      - name: Build and capture GT-BE19000AI firmware
         shell: bash
         run: |
+          set -euo pipefail
+
+          # Broadcom prebuild_checks.mk rejects root. Keep the job root for Actions,
+          # but hand the source tree and the actual compile to the image's docker user.
+          ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
+          chown -R docker:docker /project/merlin /project/artifacts /home/docker
+
+          cat >/project/build-gt-be19000ai.sh <<'BUILD'
+          #!/usr/bin/env bash
           set -euo pipefail
           test "$(id -u)" -ne 0
+          test "$(whoami)" = docker
           export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
-          sudo ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
           cd /project/merlin/release/src-rt-5.04behnd.4916
-
           echo "Builder identity:"
           id
-          echo "Toolchain PATH checks:"
-          command -v aarch64-buildroot-linux-gnu-gcc || true
-          command -v arm-buildroot-linux-gnueabi-gcc || true
           echo "Disk at build start:"
           df -h /project
-
-          # This is Merlin's real target for GT-BE19000AI. Do not rename it.
           make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
+          BUILD
+          chown docker:docker /project/build-gt-be19000ai.sh
+          chmod 0755 /project/build-gt-be19000ai.sh
+          sudo -u docker -H /project/build-gt-be19000ai.sh
 
-      - name: Package firmware
+          TARGETDIR=/project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
+          FIRMWARE="$TARGETDIR/$EXPECTED_FIRMWARE"
+          LOADER="$TARGETDIR/GT-BE19000AI_3006_102.8_4_emmc_squashfs_loader.pkgtb"
+
+          # Run #5 proved these are the real Merlin output paths.
+          test -s "$FIRMWARE"
+          test -s "$LOADER"
+          test "$(stat -c %s "$FIRMWARE")" -gt 100000000
+
+          {
+            echo "Firmware output directory: $TARGETDIR"
+            ls -lh "$FIRMWARE" "$LOADER"
+          } | tee /project/artifacts/BUILT_OUTPUTS.txt
+
+          # Copy the normal firmware immediately after a successful build so even a
+          # later step failure cannot lose the successfully-built image.
+          cp -v "$FIRMWARE" /project/artifacts/
+          cd /project/artifacts
+          sha256sum "$EXPECTED_FIRMWARE" | tee FIRMWARE_SHA256.txt
+          test -s "$EXPECTED_FIRMWARE"
+
+      - name: Verify flash artifact
         shell: bash
         run: |
           set -euo pipefail
-          IMGDIR=/project/merlin/release/src-rt-5.04behnd.4916/image
-          mapfile -t images < <(find "$IMGDIR" -maxdepth 1 -type f -name '*_emmc_squashfs.pkgtb' -print)
-          if [ "${#images[@]}" -ne 1 ]; then
-            echo "Expected exactly one GT-BE19000AI *_emmc_squashfs.pkgtb; found ${#images[@]}." >&2
-            find "$IMGDIR" -maxdepth 1 -type f -printf '%f\n' 2>/dev/null || true
-            exit 1
-          fi
-
-          cp -v "${images[0]}" /project/artifacts/
           cd /project/artifacts
-          sha256sum ./*_emmc_squashfs.pkgtb | tee FIRMWARE_SHA256.txt
-          ls -lh ./*_emmc_squashfs.pkgtb
+          test -s "$EXPECTED_FIRMWARE"
+          sha256sum -c FIRMWARE_SHA256.txt
+          echo "Flash this file only:"
+          ls -lh "$EXPECTED_FIRMWARE"
 
       - name: Upload patched firmware
         if: success()
