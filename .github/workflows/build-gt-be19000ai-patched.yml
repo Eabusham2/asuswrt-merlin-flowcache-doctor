@@ -8,11 +8,7 @@ permissions:
 
 env:
   MERLIN_BRANCH: asuswrt6
-  MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
-  EXPECTED_SERIALNO: "102.8"
-  EXPECTED_EXTENDNO: "4"
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
-  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
 
 jobs:
   build:
@@ -21,7 +17,6 @@ jobs:
     timeout-minutes: 360
     container:
       image: gnuton/asuswrt-merlin-toolchains-docker:latest
-      # Keep Actions plumbing root. Broadcom/Merlin make itself runs as docker.
       options: --user root
       volumes:
         - /mnt:/project
@@ -36,7 +31,8 @@ jobs:
           chown -R docker:docker /home/docker /project
           df -h / /mnt /project
 
-      - name: Fetch exact GT-BE19000AI Merlin source
+      - name: Resolve latest stable GT-BE19000AI Merlin release
+        id: resolve
         shell: bash
         run: |
           set -euo pipefail
@@ -44,12 +40,94 @@ jobs:
           git init merlin
           cd merlin
           git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
-          git fetch --depth 1 origin "$MERLIN_COMMIT"
-          git checkout --detach FETCH_HEAD
-          ACTUAL="$(git rev-parse HEAD)"
-          test "$ACTUAL" = "$MERLIN_COMMIT"
-          printf '%s\n' "$ACTUAL" > /project/artifacts/MERLIN_COMMIT.txt
+
+          # Fetch asuswrt6 history so we can select the newest real stable release
+          # that actually contains everything required by GT-BE19000AI.
+          git fetch --depth 1000 origin \
+            "+refs/heads/${MERLIN_BRANCH}:refs/remotes/origin/${MERLIN_BRANCH}"
+
+          VERSION_PATH=release/src-rt/version.conf
+          TARGET=release/src-rt-5.04behnd.4916/target.mak
+          CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
+          MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
+          PKTFWD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          AFCD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
+          LOCPO=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
+
+          SELECTED=""
+          SERIAL=""
+          EXTEND=""
+
+          # Inspect only commits that changed version.conf. This chooses an actual
+          # release-version point, not a later development commit carrying that version.
+          while read -r sha; do
+            conf="$(git show "${sha}:${VERSION_PATH}" 2>/dev/null)" || continue
+            serial="$(printf '%s\n' "$conf" | sed -n 's/^SERIALNO=//p' | head -n1)"
+            extend="$(printf '%s\n' "$conf" | sed -n 's/^EXTENDNO=//p' | head -n1)"
+            rcno="$(printf '%s\n' "$conf" | sed -n 's/^RCNO=//p' | head -n1)"
+
+            # Stable only. Skip alpha/beta/RC/dev branch heads.
+            [[ "$serial" =~ ^[0-9]+\.[0-9]+$ ]] || continue
+            [[ "$extend" =~ ^[0-9]+$ ]] || continue
+            [[ "${rcno:-0}" == "0" ]] || continue
+
+            # Device compatibility gate before we spend an hour compiling.
+            git cat-file -e "${sha}:${MODEL_CFG}" 2>/dev/null || continue
+            git cat-file -e "${sha}:${PKTFWD}" 2>/dev/null || continue
+            git cat-file -e "${sha}:${AFCD}" 2>/dev/null || continue
+            git cat-file -e "${sha}:${LOCPO}" 2>/dev/null || continue
+
+            target_text="$(git show "${sha}:${TARGET}" 2>/dev/null)" || continue
+            chip_text="$(git show "${sha}:${CHIP}" 2>/dev/null)" || continue
+            grep -q '^export GT-BE19000AI[[:space:]]*:=' <<<"$target_text" || continue
+            grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' <<<"$chip_text" || continue
+
+            SELECTED="$sha"
+            SERIAL="$serial"
+            EXTEND="$extend"
+            break
+          done < <(git log --format=%H "refs/remotes/origin/${MERLIN_BRANCH}" -- "$VERSION_PATH")
+
+          if [ -z "$SELECTED" ]; then
+            echo "No stable GT-BE19000AI-compatible release found in ${MERLIN_BRANCH} history." >&2
+            exit 1
+          fi
+
+          VERSION="3006.${SERIAL}_${EXTEND}"
+          FIRMWARE="GT-BE19000AI_3006_${SERIAL}_${EXTEND}_emmc_squashfs.pkgtb"
+
+          git checkout --detach "$SELECTED"
+          test "$(git rev-parse HEAD)" = "$SELECTED"
+
+          {
+            echo "MERLIN_COMMIT=$SELECTED"
+            echo "EXPECTED_SERIALNO=$SERIAL"
+            echo "EXPECTED_EXTENDNO=$EXTEND"
+            echo "EXPECTED_VERSION=$VERSION"
+            echo "EXPECTED_FIRMWARE=$FIRMWARE"
+          } >> "$GITHUB_ENV"
+
+          {
+            echo "commit=$SELECTED"
+            echo "serial=$SERIAL"
+            echo "extend=$EXTEND"
+            echo "version=$VERSION"
+            echo "firmware=$FIRMWARE"
+          } >> "$GITHUB_OUTPUT"
+
+          printf '%s\n' "$SELECTED" > /project/artifacts/MERLIN_COMMIT.txt
           printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
+          {
+            echo "AUTO_RELEASE_SELECTION=YES"
+            echo "POLICY=latest-stable-compatible"
+            echo "LINEAGE=$MERLIN_BRANCH"
+            echo "COMMIT=$SELECTED"
+            echo "VERSION=$VERSION"
+            echo "FIRMWARE=$FIRMWARE"
+          } > /project/artifacts/RELEASE_RESOLUTION.txt
+
+          echo "Selected latest stable compatible release: $VERSION"
+          echo "Selected upstream commit: $SELECTED"
 
       - name: Verify GT-BE19000AI baseline
         shell: bash
@@ -61,18 +139,21 @@ jobs:
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
 
+          test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
           grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
           grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
           test -s "$MODEL_CFG"
           grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
+          grep -q '^RCNO=0$' "$VERSION"
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
 
           {
             echo "lineage=$MERLIN_BRANCH"
             echo "commit=$MERLIN_COMMIT"
-            grep -E '^(SERIALNO|EXTENDNO)=' "$VERSION"
+            echo "version=$EXPECTED_VERSION"
+            grep -E '^(SERIALNO|EXTENDNO|RCNO)=' "$VERSION"
             grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
             grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
           } > /project/artifacts/BASELINE_VERIFICATION.txt
@@ -121,7 +202,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This exact non-destructive toolchain mapping was used by the successful build path.
           ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
           chown -R docker:docker /project/merlin /project/artifacts /home/docker
 
@@ -148,7 +228,7 @@ jobs:
           printf '%s\n' "$rc" > /project/artifacts/MAKE_EXIT_CODE.txt
           echo "Merlin make exit code: $rc"
 
-          # Do not fail here. The next steps always salvage evidence first.
+          # Always let salvage run before final green/red decision.
           exit 0
 
       - name: Salvage build outputs and diagnostics
@@ -184,7 +264,6 @@ jobs:
             echo "BUILD.log not created" > /project/artifacts/BUILD_TAIL.log
           fi
 
-          # Diagnostic only: record any DHD/PKTFWD build outputs we can find.
           if [ -d /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl ]; then
             find /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl \
               -type f \( -name 'dhd_pktfwd.o' -o -name 'dhd*.ko' -o -name '*pktfwd*.o' \) -print \
@@ -209,8 +288,10 @@ jobs:
           test -s FIRMWARE_SHA256.txt
           sha256sum -c FIRMWARE_SHA256.txt
           test "$(cat MERLIN_COMMIT.txt)" = "$MERLIN_COMMIT"
-          grep -q '^SERIALNO=102.8$' BASELINE_VERIFICATION.txt
-          grep -q '^EXTENDNO=4$' BASELINE_VERIFICATION.txt
+          grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" BASELINE_VERIFICATION.txt
+          grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" BASELINE_VERIFICATION.txt
+          grep -q '^RCNO=0$' BASELINE_VERIFICATION.txt
+          grep -q "version=${EXPECTED_VERSION}" BASELINE_VERIFICATION.txt
           grep -q 'WLC_E_ASSOC_IND' APPLIED_SOURCE_DIFF.patch
           grep -q 'WLC_E_REASSOC' APPLIED_SOURCE_DIFF.patch
           grep -q 'WLC_E_REASSOC_IND' APPLIED_SOURCE_DIFF.patch
@@ -218,8 +299,11 @@ jobs:
           printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
           {
             echo "VERIFIED_FOR_FLASH=YES"
+            echo "AUTO_RELEASE_SELECTION=YES"
+            echo "RELEASE_POLICY=latest-stable-compatible"
             echo "MODEL=GT-BE19000AI"
-            echo "VERSION=3006.102.8_4"
+            echo "VERSION=$EXPECTED_VERSION"
+            echo "UPSTREAM_LINEAGE=$MERLIN_BRANCH"
             echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
             echo "FLASH_FILE=$EXPECTED_FIRMWARE"
             echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
@@ -229,7 +313,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: GT-BE19000AI-3006.102.8_4-pktfwd-patched-${{ github.run_number }}
+          name: GT-BE19000AI-${{ steps.resolve.outputs.version }}-pktfwd-patched-${{ github.run_number }}
           path: /project/artifacts
           if-no-files-found: error
           retention-days: 14
