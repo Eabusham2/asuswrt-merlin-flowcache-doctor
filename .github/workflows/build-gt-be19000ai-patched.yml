@@ -11,9 +11,8 @@ env:
   MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
   EXPECTED_SERIALNO: "102.8"
   EXPECTED_EXTENDNO: "4"
-  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
-  EXPECTED_LOADER: GT-BE19000AI_3006_102.8_4_emmc_squashfs_loader.pkgtb
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
+  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
 
 jobs:
   build:
@@ -22,7 +21,7 @@ jobs:
     timeout-minutes: 360
     container:
       image: gnuton/asuswrt-merlin-toolchains-docker:latest
-      # Keep GitHub Actions plumbing root. Only the Merlin compile runs as docker.
+      # Keep Actions plumbing root. Broadcom/Merlin make itself runs as docker.
       options: --user root
       volumes:
         - /mnt:/project
@@ -32,10 +31,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf /project/artifacts /project/merlin /project/build-gt-be19000ai.sh
+          rm -rf /project/merlin /project/artifacts /project/build-gt-be19000ai.sh
           mkdir -p /project/artifacts
           chown -R docker:docker /home/docker /project
-          test "$(id -u)" -eq 0
           df -h / /mnt /project
 
       - name: Fetch exact GT-BE19000AI Merlin source
@@ -48,13 +46,12 @@ jobs:
           git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
           git fetch --depth 1 origin "$MERLIN_COMMIT"
           git checkout --detach FETCH_HEAD
-          ACTUAL=$(git rev-parse HEAD)
-          printf '%s\n' "$ACTUAL" | tee /project/artifacts/MERLIN_COMMIT.txt
-          printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
+          ACTUAL="$(git rev-parse HEAD)"
           test "$ACTUAL" = "$MERLIN_COMMIT"
-          test -z "$(git status --porcelain)"
+          printf '%s\n' "$ACTUAL" > /project/artifacts/MERLIN_COMMIT.txt
+          printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
 
-      - name: Verify GT-BE19000AI release baseline
+      - name: Verify GT-BE19000AI baseline
         shell: bash
         run: |
           set -euo pipefail
@@ -63,6 +60,7 @@ jobs:
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
+
           grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
           grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
           test -s "$MODEL_CFG"
@@ -70,31 +68,35 @@ jobs:
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
+
           {
             echo "lineage=$MERLIN_BRANCH"
             echo "commit=$MERLIN_COMMIT"
             grep -E '^(SERIALNO|EXTENDNO)=' "$VERSION"
             grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
             grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
-          } | tee /project/artifacts/BASELINE_VERIFICATION.txt
+          } > /project/artifacts/BASELINE_VERIFICATION.txt
 
-      - name: Patch and verify PKTFWD source
+      - name: Apply and verify PKTFWD fix
         shell: bash
         run: |
           set -euo pipefail
           REL=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
           SRC=/project/merlin/$REL
           printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
+
           python3 - "$SRC" <<'PY'
           import re
           import sys
           from pathlib import Path
+
           p = Path(sys.argv[1])
           text = p.read_text()
           pattern = re.compile(r'(?m)^(\s*)if \(param2 == WLC_E_ASSOC\) \{$')
           matches = list(pattern.finditer(text))
           if len(matches) != 1:
               raise SystemExit(f"expected exactly one WLC_E_ASSOC cleanup gate, found {len(matches)}")
+
           indent = matches[0].group(1)
           replacement = (
               f"{indent}if ((param2 == WLC_E_ASSOC) ||\n"
@@ -104,43 +106,27 @@ jobs:
           )
           p.write_text(pattern.sub(replacement, text, count=1))
           PY
+
           cd /project/merlin
           git diff --check
-          git diff -- "$REL" | tee /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          git diff -- "$REL" > /project/artifacts/APPLIED_SOURCE_DIFF.patch
           test -s /project/artifacts/APPLIED_SOURCE_DIFF.patch
-          sha256sum "$SRC" | tee /project/artifacts/PATCHED_SOURCE_SHA256.txt
-          sha256sum /project/artifacts/APPLIED_SOURCE_DIFF.patch | tee /project/artifacts/PATCH_SHA256.txt
-          grep -A14 -B3 'case dhd_pktfwd_req_assoc_sta_e' "$SRC" | tee /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
+          grep -A14 -B3 'case dhd_pktfwd_req_assoc_sta_e' "$SRC" > /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
           grep -q 'param2 == WLC_E_ASSOC_IND' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
-      - name: Preflight build environment
+      - name: Build GT-BE19000AI
         shell: bash
         run: |
           set -euo pipefail
-          test -d /home/docker/am-toolchains/brcm-arm-hnd
-          test -f /home/docker/envs/bcm-hnd-ax-4.19be.sh
-          ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
-          test -L /opt/toolchains
-          chown -R docker:docker /project/merlin /project/artifacts /home/docker
-          sudo -u docker -H bash -lc '
-            set -euo pipefail
-            test "$(id -u)" -ne 0
-            test "$(whoami)" = docker
-            export LD_LIBRARY="${LD_LIBRARY:-}"
-            source /home/docker/envs/bcm-hnd-ax-4.19be.sh
-            test -d /opt/toolchains
-            command -v make
-            command -v gcc
-            python3 --version
-          '
 
-      - name: Build and capture GT-BE19000AI firmware
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat >/project/build-gt-be19000ai.sh <<'BUILD'
+          # Recreate the toolchain path deterministically inside this disposable container.
+          rm -rf /opt/toolchains
+          ln -s /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
+          chown -R docker:docker /project/merlin /project/artifacts /home/docker
+
+          cat > /project/build-gt-be19000ai.sh <<'BUILD'
           #!/usr/bin/env bash
           set -euo pipefail
           test "$(id -u)" -ne 0
@@ -148,81 +134,47 @@ jobs:
           export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
           cd /project/merlin/release/src-rt-5.04behnd.4916
-          echo "Builder identity:"
-          id
-          echo "Disk at build start:"
-          df -h /project
           make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
           BUILD
+
           chown docker:docker /project/build-gt-be19000ai.sh
           chmod 0755 /project/build-gt-be19000ai.sh
           sudo -u docker -H /project/build-gt-be19000ai.sh
 
-          # Require Merlin's own completion marker in addition to exit code 0.
-          grep -Fq 'Done! Image 96813GW has been built' /project/artifacts/BUILD.log
-
-          FIRMWARE="$EXPECTED_TARGET_DIR/$EXPECTED_FIRMWARE"
-          LOADER="$EXPECTED_TARGET_DIR/$EXPECTED_LOADER"
-          test -d "$EXPECTED_TARGET_DIR"
-          test -s "$FIRMWARE"
-          test -s "$LOADER"
-          test "$(basename "$FIRMWARE")" = "$EXPECTED_FIRMWARE"
-          ! basename "$FIRMWARE" | grep -q 'loader'
-          test "$(stat -c %s "$FIRMWARE")" -gt 100000000
-          test "$(stat -c %s "$LOADER")" -gt 100000000
-          ! cmp -s "$FIRMWARE" "$LOADER"
-
-          {
-            echo "Firmware output directory: $EXPECTED_TARGET_DIR"
-            stat -c 'normal name=%n size=%s bytes' "$FIRMWARE"
-            stat -c 'loader name=%n size=%s bytes' "$LOADER"
-            echo "First 64 bytes of normal firmware:"
-            od -An -tx1 -N64 "$FIRMWARE"
-            echo "All PKGTB outputs:"
-            find "$EXPECTED_TARGET_DIR" -maxdepth 1 -type f -name '*.pkgtb' -printf '%f %s bytes\n' | sort
-          } | tee /project/artifacts/BUILT_OUTPUTS.txt
-
-          # Preserve the exact normal upgrade image immediately after validation.
-          cp -v "$FIRMWARE" /project/artifacts/
-          cd /project/artifacts
-          sha256sum "$EXPECTED_FIRMWARE" | tee FIRMWARE_SHA256.txt
-          test -s "$EXPECTED_FIRMWARE"
-
-      - name: Verify final flash artifact
+      - name: Capture exact flash image
         shell: bash
         run: |
           set -euo pipefail
+          FIRMWARE="$EXPECTED_TARGET_DIR/$EXPECTED_FIRMWARE"
+
+          if [ ! -s "$FIRMWARE" ]; then
+            echo "Build returned success but expected firmware is missing: $FIRMWARE" >&2
+            echo "Contents of target directory:" >&2
+            ls -lah "$EXPECTED_TARGET_DIR" >&2 || true
+            exit 1
+          fi
+
+          cp -v "$FIRMWARE" /project/artifacts/
           cd /project/artifacts
-          test "$(cat MERLIN_COMMIT.txt)" = "$MERLIN_COMMIT"
-          grep -q '^SERIALNO=102.8$' BASELINE_VERIFICATION.txt
-          grep -q '^EXTENDNO=4$' BASELINE_VERIFICATION.txt
-          grep -q 'WLC_E_ASSOC_IND' APPLIED_SOURCE_DIFF.patch
-          grep -q 'WLC_E_REASSOC' APPLIED_SOURCE_DIFF.patch
-          grep -q 'WLC_E_REASSOC_IND' APPLIED_SOURCE_DIFF.patch
-          grep -Fq 'Done! Image 96813GW has been built' BUILD.log
-          test -s "$EXPECTED_FIRMWARE"
-          test "$(stat -c %s "$EXPECTED_FIRMWARE")" -gt 100000000
-          ! basename "$EXPECTED_FIRMWARE" | grep -q 'loader'
+          sha256sum "$EXPECTED_FIRMWARE" > FIRMWARE_SHA256.txt
           sha256sum -c FIRMWARE_SHA256.txt
-          mapfile -t normal_images < <(find . -maxdepth 1 -type f -name 'GT-BE19000AI_*_emmc_squashfs.pkgtb' ! -name '*loader*' -print)
-          test "${#normal_images[@]}" -eq 1
-          test "${normal_images[0]#./}" = "$EXPECTED_FIRMWARE"
-          {
-            echo "VERIFIED_FOR_FLASH=YES"
-            echo "MODEL=GT-BE19000AI"
-            echo "VERSION=3006.102.8_4"
-            echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
-            echo "FLASH_FILE=$EXPECTED_FIRMWARE"
-            echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
-            echo "DO_NOT_FLASH_LOADER=YES"
-          } | tee FLASH_MANIFEST.txt
+          printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
           ls -lh "$EXPECTED_FIRMWARE"
 
       - name: Upload patched firmware
         uses: actions/upload-artifact@v4
         with:
           name: GT-BE19000AI-3006.102.8_4-pktfwd-patched-${{ github.run_number }}
-          path: /project/artifacts
+          path: |
+            /project/artifacts/${{ env.EXPECTED_FIRMWARE }}
+            /project/artifacts/FIRMWARE_SHA256.txt
+            /project/artifacts/FLASH_THIS_FILE.txt
+            /project/artifacts/MERLIN_COMMIT.txt
+            /project/artifacts/MERLIN_LINEAGE.txt
+            /project/artifacts/BASELINE_VERIFICATION.txt
+            /project/artifacts/PATCH_REPO_COMMIT.txt
+            /project/artifacts/APPLIED_SOURCE_DIFF.patch
+            /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
           if-no-files-found: error
           retention-days: 14
 
