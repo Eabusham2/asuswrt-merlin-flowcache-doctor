@@ -116,65 +116,121 @@ jobs:
           grep -q 'param2 == WLC_E_REASSOC' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
-      - name: Build GT-BE19000AI
+      - name: Build GT-BE19000AI and preserve exit code
         shell: bash
         run: |
           set -euo pipefail
 
-          # Recreate the toolchain path deterministically inside this disposable container.
-          rm -rf /opt/toolchains
-          ln -s /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
+          # This exact non-destructive toolchain mapping was used by the successful build path.
+          ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
           chown -R docker:docker /project/merlin /project/artifacts /home/docker
 
           cat > /project/build-gt-be19000ai.sh <<'BUILD'
           #!/usr/bin/env bash
-          set -euo pipefail
+          set -uo pipefail
           test "$(id -u)" -ne 0
           test "$(whoami)" = docker
           export LD_LIBRARY="${LD_LIBRARY:-}"
           source /home/docker/envs/bcm-hnd-ax-4.19be.sh
           cd /project/merlin/release/src-rt-5.04behnd.4916
           make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
+          rc=${PIPESTATUS[0]}
+          exit "$rc"
           BUILD
 
           chown docker:docker /project/build-gt-be19000ai.sh
           chmod 0755 /project/build-gt-be19000ai.sh
-          sudo -u docker -H /project/build-gt-be19000ai.sh
 
-      - name: Capture exact flash image
+          set +e
+          sudo -u docker -H /project/build-gt-be19000ai.sh
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > /project/artifacts/MAKE_EXIT_CODE.txt
+          echo "Merlin make exit code: $rc"
+
+          # Do not fail here. The next steps always salvage evidence first.
+          exit 0
+
+      - name: Salvage build outputs and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /project/artifacts
+
+          if [ -d "$EXPECTED_TARGET_DIR" ]; then
+            ls -lah "$EXPECTED_TARGET_DIR" > /project/artifacts/TARGET_DIR_LISTING.txt 2>&1
+            find "$EXPECTED_TARGET_DIR" -maxdepth 1 -type f -name '*.pkgtb' -printf '%f %s bytes\n' \
+              | sort > /project/artifacts/PKGTB_OUTPUTS.txt 2>&1
+          else
+            echo "missing: $EXPECTED_TARGET_DIR" > /project/artifacts/TARGET_DIR_LISTING.txt
+            : > /project/artifacts/PKGTB_OUTPUTS.txt
+          fi
+
+          FIRMWARE="$EXPECTED_TARGET_DIR/$EXPECTED_FIRMWARE"
+          if [ -s "$FIRMWARE" ]; then
+            cp -f "$FIRMWARE" /project/artifacts/
+            cd /project/artifacts
+            sha256sum "$EXPECTED_FIRMWARE" > FIRMWARE_SHA256.txt
+            sha256sum -c FIRMWARE_SHA256.txt > FIRMWARE_SHA256_CHECK.txt 2>&1
+            echo "FOUND $FIRMWARE" > FIRMWARE_STATUS.txt
+          else
+            echo "MISSING $FIRMWARE" > /project/artifacts/FIRMWARE_STATUS.txt
+          fi
+
+          if [ -s /project/artifacts/BUILD.log ]; then
+            tail -n 1000 /project/artifacts/BUILD.log > /project/artifacts/BUILD_TAIL.log
+          else
+            echo "BUILD.log not created" > /project/artifacts/BUILD_TAIL.log
+          fi
+
+          # Diagnostic only: record any DHD/PKTFWD build outputs we can find.
+          if [ -d /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl ]; then
+            find /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl \
+              -type f \( -name 'dhd_pktfwd.o' -o -name 'dhd*.ko' -o -name '*pktfwd*.o' \) -print \
+              > /project/artifacts/DHD_BUILD_OBJECTS.txt 2>/dev/null
+          else
+            echo "wl build tree unavailable" > /project/artifacts/DHD_BUILD_OBJECTS.txt
+          fi
+
+          chmod -R a+rX /project/artifacts 2>/dev/null || true
+          exit 0
+
+      - name: Verify successful flash build
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
-          FIRMWARE="$EXPECTED_TARGET_DIR/$EXPECTED_FIRMWARE"
-
-          if [ ! -s "$FIRMWARE" ]; then
-            echo "Build returned success but expected firmware is missing: $FIRMWARE" >&2
-            echo "Contents of target directory:" >&2
-            ls -lah "$EXPECTED_TARGET_DIR" >&2 || true
-            exit 1
-          fi
-
-          cp -v "$FIRMWARE" /project/artifacts/
           cd /project/artifacts
-          sha256sum "$EXPECTED_FIRMWARE" > FIRMWARE_SHA256.txt
+
+          test -s MAKE_EXIT_CODE.txt
+          test "$(cat MAKE_EXIT_CODE.txt)" = "0"
+          test -s "$EXPECTED_FIRMWARE"
+          test -s FIRMWARE_SHA256.txt
           sha256sum -c FIRMWARE_SHA256.txt
+          test "$(cat MERLIN_COMMIT.txt)" = "$MERLIN_COMMIT"
+          grep -q '^SERIALNO=102.8$' BASELINE_VERIFICATION.txt
+          grep -q '^EXTENDNO=4$' BASELINE_VERIFICATION.txt
+          grep -q 'WLC_E_ASSOC_IND' APPLIED_SOURCE_DIFF.patch
+          grep -q 'WLC_E_REASSOC' APPLIED_SOURCE_DIFF.patch
+          grep -q 'WLC_E_REASSOC_IND' APPLIED_SOURCE_DIFF.patch
+
           printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
-          ls -lh "$EXPECTED_FIRMWARE"
+          {
+            echo "VERIFIED_FOR_FLASH=YES"
+            echo "MODEL=GT-BE19000AI"
+            echo "VERSION=3006.102.8_4"
+            echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
+            echo "FLASH_FILE=$EXPECTED_FIRMWARE"
+            echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
+          } > FLASH_MANIFEST.txt
 
       - name: Upload patched firmware
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: GT-BE19000AI-3006.102.8_4-pktfwd-patched-${{ github.run_number }}
-          path: |
-            /project/artifacts/${{ env.EXPECTED_FIRMWARE }}
-            /project/artifacts/FIRMWARE_SHA256.txt
-            /project/artifacts/FLASH_THIS_FILE.txt
-            /project/artifacts/MERLIN_COMMIT.txt
-            /project/artifacts/MERLIN_LINEAGE.txt
-            /project/artifacts/BASELINE_VERIFICATION.txt
-            /project/artifacts/PATCH_REPO_COMMIT.txt
-            /project/artifacts/APPLIED_SOURCE_DIFF.patch
-            /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
+          path: /project/artifacts
           if-no-files-found: error
           retention-days: 14
 
