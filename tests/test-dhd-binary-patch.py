@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+import json
+import struct
+import subprocess
+import sys
+import tempfile
 
 root = Path(__file__).resolve().parents[1]
 mod_path = root / "tools" / "patch_dhd_pktfwd_prebuilt.py"
@@ -48,4 +53,128 @@ required = ["events 7,8,9,10", "event 8", "event 12", "zero return value"]
 for phrase in required:
     assert phrase in mod.SEMANTICS
 
-print("PASS DHD binary patch revision 2 control-flow contract")
+
+def align(value, boundary):
+    return (value + boundary - 1) & ~(boundary - 1)
+
+
+def synthetic_elf():
+    """Build a tiny ELF64/AArch64 ET_REL with the audited function signature."""
+    text_size = max(mod.ORIGINAL) + 4
+    text = bytearray(text_size)
+    for rel, word in mod.ORIGINAL.items():
+        struct.pack_into("<I", text, rel, word)
+
+    strtab = b"\0dhd_pktfwd_request\0"
+    shstr = b"\0.text\0.symtab\0.strtab\0.shstrtab\0"
+    text_off = 0x100
+    symtab_off = align(text_off + len(text), 8)
+
+    # ELF64 symbol table: null symbol + one global function symbol.
+    symtab = bytearray(48)
+    struct.pack_into("<IBBHQQ", symtab, 24, 1, 0x12, 0, 1, 0, text_size)
+
+    strtab_off = symtab_off + len(symtab)
+    shstr_off = strtab_off + len(strtab)
+    shoff = align(shstr_off + len(shstr), 8)
+    out = bytearray(shoff + 5 * 64)
+
+    ident = bytearray(16)
+    ident[:4] = b"\x7fELF"
+    ident[4] = 2  # ELFCLASS64
+    ident[5] = 1  # little-endian
+    ident[6] = 1  # EV_CURRENT
+    struct.pack_into(
+        "<16sHHIQQQIHHHHHH",
+        out,
+        0,
+        bytes(ident),
+        1,      # ET_REL
+        183,    # EM_AARCH64
+        1,
+        0,
+        0,
+        shoff,
+        0,
+        64,
+        0,
+        0,
+        64,
+        5,
+        4,
+    )
+
+    out[text_off:text_off + len(text)] = text
+    out[symtab_off:symtab_off + len(symtab)] = symtab
+    out[strtab_off:strtab_off + len(strtab)] = strtab
+    out[shstr_off:shstr_off + len(shstr)] = shstr
+
+    shfmt = "<IIQQQQIIQQ"
+    names = {".text": 1, ".symtab": 7, ".strtab": 15, ".shstrtab": 23}
+    headers = [
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        (names[".text"], 1, 0x6, 0, text_off, len(text), 0, 0, 4, 0),
+        (names[".symtab"], 2, 0, 0, symtab_off, len(symtab), 3, 1, 8, 24),
+        (names[".strtab"], 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
+        (names[".shstrtab"], 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0),
+    ]
+    for i, header in enumerate(headers):
+        struct.pack_into(shfmt, out, shoff + i * 64, *header)
+    return bytes(out)
+
+
+# Exercise the actual CLI/parser/writer end to end without storing Broadcom binaries.
+with tempfile.TemporaryDirectory() as tmpdir:
+    tmp = Path(tmpdir)
+    elf = tmp / "dhd.o"
+    patch_report = tmp / "patch.json"
+    verify_report = tmp / "verify.json"
+    original = synthetic_elf()
+    elf.write_bytes(original)
+
+    subprocess.run(
+        [sys.executable, str(mod_path), "patch", str(elf), "--report", str(patch_report)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    patched = elf.read_bytes()
+    assert len(patched) == len(original), "binary patch must not change object size"
+
+    patch = json.loads(patch_report.read_text())
+    assert patch["patch_revision"] == 2
+    assert patch["state_before"] == "original"
+    assert patch["state_after"] == "patched"
+    assert patch["changed"] is True
+
+    subprocess.run(
+        [sys.executable, str(mod_path), "verify", str(elf), "--report", str(verify_report)],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    verify = json.loads(verify_report.read_text())
+    assert verify["patch_revision"] == 2
+    assert verify["state_before"] == "patched"
+    assert verify["state_after"] == "patched"
+    assert verify["changed"] is False
+
+    function_off, _, _ = mod.locate_symbol(patched)
+    assert mod.state_of(mod.read_words(patched, function_off)) == "patched"
+
+    # Fail closed: an unknown instruction signature must be rejected byte-for-byte.
+    unknown = tmp / "unknown.o"
+    bad = bytearray(original)
+    original_off, _, _ = mod.locate_symbol(original)
+    struct.pack_into("<I", bad, original_off + 0x160, 0)
+    unknown.write_bytes(bad)
+    before = unknown.read_bytes()
+    proc = subprocess.run(
+        [sys.executable, str(mod_path), "patch", str(unknown)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    assert proc.returncode != 0, "unknown binary signature must be rejected"
+    assert "signature is unknown" in proc.stdout
+    assert unknown.read_bytes() == before, "refused patch must not mutate the object"
+
+print("PASS DHD binary patch revision 2 control-flow + synthetic ELF patch/verify/refusal contract")
