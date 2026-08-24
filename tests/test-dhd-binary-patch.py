@@ -36,7 +36,6 @@ def bcond_target(pc, word, expected_cond):
     return pc + sign_extend((word >> 5) & 0x7FFFF, 19) * 4
 
 
-# Revision-2 control-flow contract.
 assert bcond_target(0x16C, mod.PATCHED[0x16C], 0x9) == 0x224
 assert bcond_target(0x174, mod.PATCHED[0x174], 0x1) == 0x144
 assert b_target(0x188, mod.PATCHED[0x188]) == 0x118
@@ -50,40 +49,51 @@ def align(value, boundary):
     return (value + boundary - 1) & ~(boundary - 1)
 
 
-def synthetic_elf(section_name=".text", symtab_name=".symtab", symbol_size=None,
-                  duplicate_undefined=False):
-    """Create a minimal ELF64/AArch64 ET_REL carrying the audited signature."""
+def synthetic_elf(section_name=".text", with_symtab=True):
+    """Create minimal ELF64/AArch64 ET_REL with one executable audited signature."""
     text_size = max(mod.ORIGINAL) + 4
     text = bytearray(text_size)
     for rel, word in mod.ORIGINAL.items():
         struct.pack_into("<I", text, rel, word)
 
-    strtab = b"\0dhd_pktfwd_request\0"
-    names = [section_name, symtab_name, ".strtab", ".shstrtab"]
-    shstr = b"\0"
-    name_off = {}
-    for name in names:
-        name_off[name] = len(shstr)
-        shstr += name.encode() + b"\0"
-
+    shstr = b"\0" + section_name.encode() + b"\0"
+    text_name = 1
     text_off = 0x100
-    entries = [bytes(24)]
-    if duplicate_undefined:
-        entry = bytearray(24)
-        struct.pack_into("<IBBHQQ", entry, 0, 1, 0x12, 0, 0, 0, 0)
-        entries.append(bytes(entry))
-    entry = bytearray(24)
-    size = text_size if symbol_size is None else symbol_size
-    struct.pack_into("<IBBHQQ", entry, 0, 1, 0x12, 0, 1, 0, size)
-    entries.append(bytes(entry))
-    symtab = b"".join(entries)
+    pos = align(text_off + len(text), 8)
 
-    symtab_off = align(text_off + len(text), 8)
-    strtab_off = symtab_off + len(symtab)
-    shstr_off = strtab_off + len(strtab)
+    headers = [
+        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        (text_name, 1, 0x6, 0, text_off, len(text), 0, 0, 4, 0),
+    ]
+
+    if with_symtab:
+        symtab_name = len(shstr)
+        shstr += b".whatever-symbols\0"
+        strtab_name = len(shstr)
+        shstr += b".whatever-strings\0"
+        symtab_off = pos
+        symtab = bytearray(48)
+        struct.pack_into("<IBBHQQ", symtab, 24, 1, 0x12, 0, 1, 0, 0)
+        pos = symtab_off + len(symtab)
+        strtab_off = pos
+        strtab = b"\0dhd_pktfwd_request\0"
+        pos = strtab_off + len(strtab)
+        headers += [
+            (symtab_name, 2, 0, 0, symtab_off, len(symtab), 3, 1, 8, 24),
+            (strtab_name, 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
+        ]
+    else:
+        symtab = b""
+        strtab = b""
+
+    shstr_name = len(shstr)
+    shstr += b".shstrtab\0"
+    shstr_off = pos
     shoff = align(shstr_off + len(shstr), 8)
-    out = bytearray(shoff + 5 * 64)
+    shstr_index = len(headers)
+    headers.append((shstr_name, 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0))
 
+    out = bytearray(shoff + len(headers) * 64)
     ident = bytearray(16)
     ident[:4] = b"\x7fELF"
     ident[4] = 2
@@ -91,27 +101,19 @@ def synthetic_elf(section_name=".text", symtab_name=".symtab", symbol_size=None,
     ident[6] = 1
     struct.pack_into(
         "<16sHHIQQQIHHHHHH", out, 0, bytes(ident), 1, 183, 1,
-        0, 0, shoff, 0, 64, 0, 0, 64, 5, 4,
+        0, 0, shoff, 0, 64, 0, 0, 64, len(headers), shstr_index,
     )
     out[text_off:text_off + len(text)] = text
-    out[symtab_off:symtab_off + len(symtab)] = symtab
-    out[strtab_off:strtab_off + len(strtab)] = strtab
+    if with_symtab:
+        out[symtab_off:symtab_off + len(symtab)] = symtab
+        out[strtab_off:strtab_off + len(strtab)] = strtab
     out[shstr_off:shstr_off + len(shstr)] = shstr
-
-    headers = [
-        (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
-        (name_off[section_name], 1, 0x6, 0, text_off, len(text), 0, 0, 4, 0),
-        (name_off[symtab_name], 2, 0, 0, symtab_off, len(symtab), 3, 1, 8, 24),
-        (name_off[".strtab"], 3, 0, 0, strtab_off, len(strtab), 0, 0, 1, 0),
-        (name_off[".shstrtab"], 3, 0, 0, shstr_off, len(shstr), 0, 0, 1, 0),
-    ]
     for i, header in enumerate(headers):
         struct.pack_into("<IIQQQQIIQQ", out, shoff + i * 64, *header)
     return bytes(out)
 
 
-def patch_verify_case(tmp, name, data, expected_section, expected_symtab,
-                      expected_records):
+def patch_verify_case(tmp, name, data):
     elf = tmp / name
     patch_report = tmp / f"{name}.patch.json"
     verify_report = tmp / f"{name}.verify.json"
@@ -125,12 +127,10 @@ def patch_verify_case(tmp, name, data, expected_section, expected_symtab,
     assert len(elf.read_bytes()) == original_len
     patch = json.loads(patch_report.read_text())
     assert patch["patch_revision"] == 2
+    assert patch["match_method"] == "unique-executable-signature"
     assert patch["state_before"] == "original"
     assert patch["state_after"] == "patched"
     assert patch["changed"] is True
-    assert patch["symbol_section"] == expected_section
-    assert patch["symbol_table"] == expected_symtab
-    assert patch["matching_symbol_records"] == expected_records
 
     subprocess.run(
         [sys.executable, str(mod_path), "verify", str(elf), "--report", str(verify_report)],
@@ -145,27 +145,12 @@ def patch_verify_case(tmp, name, data, expected_section, expected_symtab,
 with tempfile.TemporaryDirectory() as tmpdir:
     tmp = Path(tmpdir)
 
-    # Standard ELF metadata.
-    patch_verify_case(tmp, "normal.o", synthetic_elf(), ".text", ".symtab", 1)
+    patch_verify_case(tmp, "normal.o", synthetic_elf(".text", with_symtab=True))
+    patch_verify_case(tmp, "odd-section.o", synthetic_elf(".code.hot", with_symtab=True))
+    patch_verify_case(tmp, "no-symbol-table.o", synthetic_elf(".vendor_exec", with_symtab=False))
 
-    # Function-specific executable section.
-    patch_verify_case(
-        tmp, "subsection.o", synthetic_elf(".text.dhd_pktfwd_request"),
-        ".text.dhd_pktfwd_request", ".symtab", 1,
-    )
-
-    # Real-world linked/prebuilt variations: arbitrary executable section name,
-    # nonstandard SYMTAB section name, zero-sized function symbol, and an
-    # additional undefined symbol record with the same name.
-    patch_verify_case(
-        tmp, "prebuilt-shape.o",
-        synthetic_elf(".code.hot", ".symbols", symbol_size=0, duplicate_undefined=True),
-        ".code.hot", ".symbols", 2,
-    )
-
-    # Fail closed: unknown machine code must never be modified.
     unknown = tmp / "unknown.o"
-    original = synthetic_elf()
+    original = synthetic_elf(".vendor_exec", with_symtab=False)
     bad = bytearray(original)
     original_off, *_ = mod.locate_symbol(original)
     struct.pack_into("<I", bad, original_off + 0x160, 0)
@@ -177,7 +162,46 @@ with tempfile.TemporaryDirectory() as tmpdir:
     )
     assert proc.returncode != 0
     assert "found 0" in proc.stdout
-    assert '"state": "unknown"' in proc.stdout
     assert unknown.read_bytes() == before
 
-print("PASS DHD revision-2 control flow + robust ELF metadata + fail-closed contract")
+    one = synthetic_elf(".text", with_symtab=False)
+    sections = mod.parse_executable_sections(one)
+    first = sections[0]
+    payload = one[first["offset"]:first["offset"] + first["size"]]
+
+    def two_exec_elf():
+        text_size = len(payload)
+        off1 = 0x100
+        off2 = align(off1 + text_size, 8)
+        shoff = align(off2 + text_size, 8)
+        out = bytearray(shoff + 3 * 64)
+        ident = bytearray(16)
+        ident[:4] = b"\x7fELF"
+        ident[4] = 2
+        ident[5] = 1
+        ident[6] = 1
+        struct.pack_into(
+            "<16sHHIQQQIHHHHHH", out, 0, bytes(ident), 1, 183, 1,
+            0, 0, shoff, 0, 64, 0, 0, 64, 3, 0,
+        )
+        out[off1:off1 + text_size] = payload
+        out[off2:off2 + text_size] = payload
+        headers = [
+            (0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            (0, 1, 0x6, 0, off1, text_size, 0, 0, 4, 0),
+            (0, 1, 0x6, 0, off2, text_size, 0, 0, 4, 0),
+        ]
+        for i, header in enumerate(headers):
+            struct.pack_into("<IIQQQQIIQQ", out, shoff + i * 64, *header)
+        return bytes(out)
+
+    duplicate = tmp / "duplicate.o"
+    duplicate.write_bytes(two_exec_elf())
+    proc = subprocess.run(
+        [sys.executable, str(mod_path), "patch", str(duplicate)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    assert proc.returncode != 0
+    assert "found 2" in proc.stdout
+
+print("PASS DHD revision-2 control flow + unique executable-signature patch/verify/fail-closed contract")
