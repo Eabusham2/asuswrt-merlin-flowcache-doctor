@@ -7,7 +7,6 @@ from pathlib import Path
 import struct
 
 EM_AARCH64 = 183
-ET_REL = 1
 PATCH_REVISION = 2
 
 ORIGINAL = {
@@ -36,7 +35,6 @@ SEMANTICS = (
 
 PATCH_END = max(PATCHED) + 4
 ANCHOR_REL = 0x160
-ANCHOR_LEN = 12
 
 
 def sha256(data: bytes) -> str:
@@ -48,9 +46,7 @@ def validate_elf(data: bytes):
         raise ValueError("not an ELF file")
     if data[4] != 2 or data[5] != 1:
         raise ValueError("expected ELF64 little-endian")
-    _, e_type, e_machine = struct.unpack_from("<16sHH", data, 0)
-    if e_type != ET_REL:
-        raise ValueError(f"expected relocatable ELF ET_REL ({ET_REL}), got {e_type}")
+    _, _, e_machine = struct.unpack_from("<16sHH", data, 0)
     if e_machine != EM_AARCH64:
         raise ValueError(f"expected AArch64 ELF machine {EM_AARCH64}, got {e_machine}")
 
@@ -97,7 +93,6 @@ def _find_all(data: bytes, needle: bytes):
 
 
 def locate_signature(data: bytes):
-    """Locate exactly one full audited signature without trusting ELF metadata tables."""
     validate_elf(data)
     matches = []
     near = []
@@ -142,7 +137,6 @@ def locate_signature(data: bytes):
     return matches[0]
 
 
-# Compatibility helper for older repository tests/callers. No symbol metadata is consulted.
 def locate_symbol(data: bytes):
     match = locate_signature(data)
     return (
@@ -235,7 +229,7 @@ def main():
         "tool": "FlowCache Doctor DHD PKTFWD prebuilt patcher",
         "patch_revision": PATCH_REVISION,
         "match_method": "unique-full-instruction-signature",
-        "elf_metadata_dependency": "header-only",
+        "elf_metadata_dependency": "architecture-header-only",
         "file": str(path),
         "mode": args.mode,
         "function_file_offset": f"0x{after_off:x}",
