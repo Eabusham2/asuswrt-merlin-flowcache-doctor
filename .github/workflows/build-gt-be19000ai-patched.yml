@@ -9,7 +9,6 @@ permissions:
 env:
   MERLIN_BRANCH: asuswrt6
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
-  DHD_BINARY_PATCH_REVISION: "2"
 
 jobs:
   build:
@@ -32,9 +31,6 @@ jobs:
           chown -R docker:docker /home/docker /project
           df -h / /mnt /project
 
-      - name: Checkout patch tools
-        uses: actions/checkout@v4
-
       - name: Resolve latest stable GT-BE19000AI Merlin release
         id: resolve
         shell: bash
@@ -45,6 +41,8 @@ jobs:
           cd merlin
           git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
 
+          # Fetch asuswrt6 history so we can select the newest real stable release
+          # that actually contains everything required by GT-BE19000AI.
           git fetch --depth 1000 origin \
             "+refs/heads/${MERLIN_BRANCH}:refs/remotes/origin/${MERLIN_BRANCH}"
 
@@ -53,7 +51,6 @@ jobs:
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           PKTFWD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-          DHD_PREBUILT=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
           AFCD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           LOCPO=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
 
@@ -61,19 +58,22 @@ jobs:
           SERIAL=""
           EXTEND=""
 
+          # Inspect only commits that changed version.conf. This chooses an actual
+          # release-version point, not a later development commit carrying that version.
           while read -r sha; do
             conf="$(git show "${sha}:${VERSION_PATH}" 2>/dev/null)" || continue
             serial="$(printf '%s\n' "$conf" | sed -n 's/^SERIALNO=//p' | head -n1)"
             extend="$(printf '%s\n' "$conf" | sed -n 's/^EXTENDNO=//p' | head -n1)"
             rcno="$(printf '%s\n' "$conf" | sed -n 's/^RCNO=//p' | head -n1)"
 
+            # Stable only. Skip alpha/beta/RC/dev branch heads.
             [[ "$serial" =~ ^[0-9]+\.[0-9]+$ ]] || continue
             [[ "$extend" =~ ^[0-9]+$ ]] || continue
             [[ "${rcno:-0}" == "0" ]] || continue
 
+            # Device compatibility gate before we spend an hour compiling.
             git cat-file -e "${sha}:${MODEL_CFG}" 2>/dev/null || continue
             git cat-file -e "${sha}:${PKTFWD}" 2>/dev/null || continue
-            git cat-file -e "${sha}:${DHD_PREBUILT}" 2>/dev/null || continue
             git cat-file -e "${sha}:${AFCD}" 2>/dev/null || continue
             git cat-file -e "${sha}:${LOCPO}" 2>/dev/null || continue
 
@@ -138,13 +138,11 @@ jobs:
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
-          DHD_PREBUILT=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
 
           test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
           grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
           grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
           test -s "$MODEL_CFG"
-          test -s "$DHD_PREBUILT"
           grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
           grep -q '^RCNO=0$' "$VERSION"
@@ -158,10 +156,9 @@ jobs:
             grep -E '^(SERIALNO|EXTENDNO|RCNO)=' "$VERSION"
             grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
             grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
-            echo "dhd_prebuilt=$DHD_PREBUILT"
           } > /project/artifacts/BASELINE_VERIFICATION.txt
 
-      - name: Apply source-level PKTFWD reference fix
+      - name: Apply and verify PKTFWD fix
         shell: bash
         run: |
           set -euo pipefail
@@ -200,37 +197,6 @@ jobs:
           grep -q 'param2 == WLC_E_REASSOC' "$SRC"
           grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
 
-      - name: Patch and verify effective prebuilt DHD binary revision 2
-        shell: bash
-        run: |
-          set -euo pipefail
-          TOOL="$GITHUB_WORKSPACE/tools/patch_dhd_pktfwd_prebuilt.py"
-          DHD_PREBUILT=/project/merlin/release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
-
-          test -s "$TOOL"
-          test -s "$DHD_PREBUILT"
-          python3 "$GITHUB_WORKSPACE/tests/test-dhd-binary-patch.py"
-          sha256sum "$TOOL" > /project/artifacts/DHD_BINARY_PATCHER_SHA256.txt
-          sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256_BEFORE.txt
-
-          python3 "$TOOL" patch "$DHD_PREBUILT" \
-            --report /project/artifacts/DHD_PREBUILT_PATCH.json
-          python3 "$TOOL" verify "$DHD_PREBUILT" \
-            --report /project/artifacts/DHD_PREBUILT_VERIFY.json
-
-          sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256_AFTER.txt
-          python3 - /project/artifacts/DHD_PREBUILT_PATCH.json /project/artifacts/DHD_PREBUILT_VERIFY.json "$DHD_BINARY_PATCH_REVISION" <<'PY'
-          import json, sys
-          expected = int(sys.argv[3])
-          for path in sys.argv[1:3]:
-              report = json.load(open(path))
-              if report.get("state_after") != "patched":
-                  raise SystemExit(f"{path}: prebuilt DHD binary did not reach patched state")
-              if report.get("patch_revision") != expected:
-                  raise SystemExit(f"{path}: expected patch revision {expected}, got {report.get('patch_revision')}")
-          print(f"effective prebuilt DHD patch revision {expected} verified")
-          PY
-
       - name: Build GT-BE19000AI and preserve exit code
         shell: bash
         run: |
@@ -262,6 +228,7 @@ jobs:
           printf '%s\n' "$rc" > /project/artifacts/MAKE_EXIT_CODE.txt
           echo "Merlin make exit code: $rc"
 
+          # Always let salvage run before final green/red decision.
           exit 0
 
       - name: Salvage build outputs and diagnostics
@@ -297,22 +264,6 @@ jobs:
             echo "BUILD.log not created" > /project/artifacts/BUILD_TAIL.log
           fi
 
-          find "$EXPECTED_TARGET_DIR/fs/lib/modules" -type f -path '*/extra/dhd.ko' 2>/dev/null \
-            | sort > /project/artifacts/DHD_FINAL_MODULE_CANDIDATES.txt
-          DHD_COUNT=$(awk 'NF{n++}END{print n+0}' /project/artifacts/DHD_FINAL_MODULE_CANDIDATES.txt)
-          echo "$DHD_COUNT" > /project/artifacts/DHD_FINAL_MODULE_COUNT.txt
-          if [ "$DHD_COUNT" -eq 1 ]; then
-            DHD_MODULE=$(cat /project/artifacts/DHD_FINAL_MODULE_CANDIDATES.txt)
-            printf '%s\n' "$DHD_MODULE" > /project/artifacts/DHD_FINAL_MODULE_PATH.txt
-            sha256sum "$DHD_MODULE" > /project/artifacts/DHD_FINAL_MODULE_SHA256.txt
-            python3 "$GITHUB_WORKSPACE/tools/patch_dhd_pktfwd_prebuilt.py" inspect "$DHD_MODULE" \
-              --report /project/artifacts/DHD_FINAL_MODULE_INSPECT.json \
-              > /project/artifacts/DHD_FINAL_MODULE_INSPECT.stdout 2>&1
-          else
-            echo "Expected exactly one final dhd.ko; found $DHD_COUNT" \
-              > /project/artifacts/DHD_FINAL_MODULE_ERROR.txt
-          fi
-
           if [ -d /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl ]; then
             find /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl \
               -type f \( -name 'dhd_pktfwd.o' -o -name 'dhd*.ko' -o -name '*pktfwd*.o' \) -print \
@@ -324,7 +275,7 @@ jobs:
           chmod -R a+rX /project/artifacts 2>/dev/null || true
           exit 0
 
-      - name: Verify successful flash build and final DHD binary revision 2
+      - name: Verify successful flash build
         if: always()
         shell: bash
         run: |
@@ -345,34 +296,9 @@ jobs:
           grep -q 'WLC_E_REASSOC' APPLIED_SOURCE_DIFF.patch
           grep -q 'WLC_E_REASSOC_IND' APPLIED_SOURCE_DIFF.patch
 
-          test -s DHD_PREBUILT_PATCH.json
-          test -s DHD_PREBUILT_VERIFY.json
-          test "$(cat DHD_FINAL_MODULE_COUNT.txt)" = "1"
-          test -s DHD_FINAL_MODULE_PATH.txt
-          DHD_MODULE=$(cat DHD_FINAL_MODULE_PATH.txt)
-          test -s "$DHD_MODULE"
-          python3 "$GITHUB_WORKSPACE/tools/patch_dhd_pktfwd_prebuilt.py" verify "$DHD_MODULE" \
-            --report /project/artifacts/DHD_FINAL_MODULE_VERIFICATION.json
-          test -s DHD_FINAL_MODULE_VERIFICATION.json
-
-          python3 - DHD_PREBUILT_PATCH.json DHD_PREBUILT_VERIFY.json DHD_FINAL_MODULE_VERIFICATION.json "$DHD_BINARY_PATCH_REVISION" <<'PY'
-          import json, sys
-          expected = int(sys.argv[4])
-          for path in sys.argv[1:4]:
-              report = json.load(open(path))
-              if report.get("state_after") != "patched":
-                  raise SystemExit(f"{path}: DHD binary is not patched")
-              if report.get("patch_revision") != expected:
-                  raise SystemExit(f"{path}: expected patch revision {expected}, got {report.get('patch_revision')}")
-          print(f"final DHD binary patch revision {expected} verified")
-          PY
-
           printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
           {
             echo "VERIFIED_FOR_FLASH=YES"
-            echo "DHD_BINARY_PATCH_VERIFIED=YES"
-            echo "DHD_BINARY_PATCH_REVISION=$DHD_BINARY_PATCH_REVISION"
-            echo "PATCH_METHOD=verified-prebuilt-dhd-binary"
             echo "AUTO_RELEASE_SELECTION=YES"
             echo "RELEASE_POLICY=latest-stable-compatible"
             echo "MODEL=GT-BE19000AI"
@@ -381,7 +307,6 @@ jobs:
             echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
             echo "FLASH_FILE=$EXPECTED_FIRMWARE"
             echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
-            echo "DHD_FINAL_SHA256=$(cut -d' ' -f1 DHD_FINAL_MODULE_SHA256.txt)"
           } > FLASH_MANIFEST.txt
 
       - name: Upload patched firmware
