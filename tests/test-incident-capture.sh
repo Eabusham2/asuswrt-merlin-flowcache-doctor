@@ -2,6 +2,7 @@
 set -eu
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 export FCD_ROOT="$T/root" FCD_STATE="$T/state" FCD_LOG_SYSLOG=0
+export FCD_BSSLIST="wl0.1 wl1.1 wl2.1"
 export FCD_INCIDENT_SAMPLES=2 FCD_INCIDENT_SAMPLE_INTERVAL=0 FCD_INCIDENT_COOLDOWN=0
 mkdir -p "$T/bin" "$T/lib" "$FCD_ROOT" "$FCD_STATE"
 cat scripts/fcd-lib.sh scripts/fcd-platform-gtbe19000ai.sh > "$T/lib/fcd-lib.sh"
