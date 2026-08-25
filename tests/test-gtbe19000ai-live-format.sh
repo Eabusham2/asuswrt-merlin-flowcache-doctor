@@ -56,6 +56,6 @@ fcd_observe_class 02:11:22:33:44:77 mlo-fallback-unclassified wl0.1
 
 echo 10 > "$UTIL2G_FILE"; fcd_observe_radio_util wl0.1
 echo 50 > "$UTIL2G_FILE"; fcd_observe_radio_util wl0.1
-grep -q 'UTIL-SPIKE.*bss=wl0.1.*previous=10% current=50%' "$FCD_ROOT/log"/events.log || { echo 'FAIL utilization spike log'; exit 1; }
+grep -q 'UTIL-SPIKE.*bss=wl0.1.*previous=10% current=50%' "$FCD_ROOT/log"/events-*.log || { echo 'FAIL utilization spike log'; exit 1; }
 
 echo 'PASS GT-BE19000AI live format, cause classifier, and fail-closed fallback'
