@@ -72,7 +72,8 @@ sleep 4
 grep -qx "flush --hw --mac $M2" "$T/fcctl.calls" || { echo 'FAIL SBF INIT did not auto-heal'; cat "$T/fcctl.calls"; exit 1; }
 
 [ "$(wc -l < "$T/fcctl.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL unexpected hardware flush count'; cat "$T/fcctl.calls"; exit 1; }
-"$ROOT/scripts/fcd-mlo-runner-heal.sh" status | grep -q running
+status_out=$("$ROOT/scripts/fcd-mlo-runner-heal.sh" status)
+printf '%s\n' "$status_out" | grep -q running
 "$ROOT/scripts/fcd-mlo-runner-heal.sh" stop
 
 echo 'PASS automatic MLO Runner healing'
