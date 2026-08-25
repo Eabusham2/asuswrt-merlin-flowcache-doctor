@@ -8,8 +8,6 @@ import struct
 
 EM_AARCH64 = 183
 ET_REL = 1
-SHT_PROGBITS = 1
-SHF_EXECINSTR = 0x4
 PATCH_REVISION = 2
 
 ORIGINAL = {
@@ -38,14 +36,28 @@ SEMANTICS = (
 
 PATCH_END = max(PATCHED) + 4
 ANCHOR_REL = 0x160
-ANCHOR_WORDS = {ORIGINAL[ANCHOR_REL], PATCHED[ANCHOR_REL]}
+ANCHOR_LEN = 12
 
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def validate_elf(data: bytes):
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        raise ValueError("not an ELF file")
+    if data[4] != 2 or data[5] != 1:
+        raise ValueError("expected ELF64 little-endian")
+    _, e_type, e_machine = struct.unpack_from("<16sHH", data, 0)
+    if e_type != ET_REL:
+        raise ValueError(f"expected relocatable ELF ET_REL ({ET_REL}), got {e_type}")
+    if e_machine != EM_AARCH64:
+        raise ValueError(f"expected AArch64 ELF machine {EM_AARCH64}, got {e_machine}")
+
+
 def read_words(data: bytes, function_file_offset: int):
+    if function_file_offset < 0 or function_file_offset + PATCH_END > len(data):
+        raise ValueError("DHD signature window is outside the file")
     return {
         rel: struct.unpack_from("<I", data, function_file_offset + rel)[0]
         for rel in ORIGINAL
@@ -64,116 +76,102 @@ def fmt_words(words):
     return {f"0x{k:03x}": f"0x{v:08x}" for k, v in sorted(words.items())}
 
 
-def parse_executable_sections(data: bytes):
-    if len(data) < 64 or data[:4] != b"\x7fELF":
-        raise ValueError("not an ELF file")
-    if data[4] != 2 or data[5] != 1:
-        raise ValueError("expected ELF64 little-endian")
+def anchor_bytes(words):
+    return b"".join(struct.pack("<I", words[rel]) for rel in (0x160, 0x164, 0x168))
 
-    hdr = struct.unpack_from("<16sHHIQQQIHHHHHH", data, 0)
-    (_, e_type, e_machine, _, _, _, e_shoff, _, _, _, _, e_shentsize,
-     e_shnum, _) = hdr
-    if e_type != ET_REL:
-        raise ValueError(f"expected ET_REL ({ET_REL}), got {e_type}")
-    if e_machine != EM_AARCH64:
-        raise ValueError(f"expected AArch64 ELF machine {EM_AARCH64}, got {e_machine}")
-    if e_shentsize != 64 or e_shnum == 0:
-        raise ValueError("invalid ELF section table")
-    if e_shoff + e_shnum * e_shentsize > len(data):
-        raise ValueError("ELF section table extends past EOF")
 
-    executable = []
-    for i in range(e_shnum):
-        f = struct.unpack_from("<IIQQQQIIQQ", data, e_shoff + i * e_shentsize)
-        sec_type, flags, offset, size = f[1], f[2], f[4], f[5]
-        if sec_type != SHT_PROGBITS or not (flags & SHF_EXECINSTR) or size == 0:
-            continue
-        if offset > len(data) or offset + size > len(data):
-            raise ValueError(f"executable section {i} extends past EOF")
-        executable.append({
-            "index": i,
-            "offset": offset,
-            "size": size,
-            "flags": flags,
-        })
+ANCHORS = {
+    "original": anchor_bytes(ORIGINAL),
+    "patched": anchor_bytes(PATCHED),
+}
 
-    if not executable:
-        raise ValueError("no executable PROGBITS sections found")
-    return executable
+
+def _find_all(data: bytes, needle: bytes):
+    pos = 0
+    while True:
+        pos = data.find(needle, pos)
+        if pos < 0:
+            return
+        yield pos
+        pos += 1
 
 
 def locate_signature(data: bytes):
-    sections = parse_executable_sections(data)
+    """Locate exactly one full audited signature without trusting ELF metadata tables."""
+    validate_elf(data)
     matches = []
     near = []
+    seen_candidates = set()
 
-    for sec in sections:
-        start = sec["offset"]
-        end = start + sec["size"]
-        anchor_start = start + ANCHOR_REL
-        if anchor_start >= end:
-            continue
+    for anchor_state, needle in ANCHORS.items():
+        for anchor_pos in _find_all(data, needle):
+            function_off = anchor_pos - ANCHOR_REL
+            if function_off < 0 or (function_off & 3):
+                continue
+            if function_off + PATCH_END > len(data):
+                continue
+            if function_off in seen_candidates:
+                continue
+            seen_candidates.add(function_off)
 
-        pos = anchor_start + ((4 - (anchor_start & 3)) & 3)
-        while pos + 4 <= end:
-            word = struct.unpack_from("<I", data, pos)[0]
-            if word in ANCHOR_WORDS:
-                function_off = pos - ANCHOR_REL
-                if function_off >= start and function_off + PATCH_END <= end:
-                    words = read_words(data, function_off)
-                    state = state_of(words)
-                    if state in ("original", "patched"):
-                        matches.append({
-                            "file_offset": function_off,
-                            "section_index": sec["index"],
-                            "section_offset": start,
-                            "section_size": sec["size"],
-                            "state": state,
-                            "words": fmt_words(words),
-                        })
-                    else:
-                        score = sum(
-                            words[rel] in (ORIGINAL[rel], PATCHED[rel])
-                            for rel in ORIGINAL
-                        )
-                        if score >= 10:
-                            near.append({
-                                "file_offset": function_off,
-                                "section_index": sec["index"],
-                                "matching_words": score,
-                                "words": fmt_words(words),
-                            })
-            pos += 4
-
-    unique = {}
-    for match in matches:
-        unique[(match["file_offset"], match["state"])] = match
-    matches = list(unique.values())
+            words = read_words(data, function_off)
+            state = state_of(words)
+            rec = {
+                "file_offset": function_off,
+                "anchor_state": anchor_state,
+                "state": state,
+                "words": fmt_words(words),
+            }
+            if state in ("original", "patched"):
+                matches.append(rec)
+            else:
+                score = sum(
+                    words[rel] in (ORIGINAL[rel], PATCHED[rel])
+                    for rel in ORIGINAL
+                )
+                if score >= 10:
+                    rec["matching_words"] = score
+                    near.append(rec)
 
     if len(matches) != 1:
         raise ValueError(
-            "expected exactly one audited DHD PKTFWD instruction signature "
-            f"in executable code; found {len(matches)}\n"
-            + json.dumps(
-                {"matches": matches, "near_matches": near[:8], "executable_sections": sections},
-                indent=2,
-                sort_keys=True,
-            )
+            "expected exactly one audited DHD PKTFWD instruction signature; "
+            f"found {len(matches)}\n"
+            + json.dumps({"matches": matches, "near_matches": near[:8]}, indent=2, sort_keys=True)
         )
     return matches[0]
 
 
-# Backward-compatible helper used by repo tests; symbol metadata is intentionally ignored.
+# Compatibility helper for older repository tests/callers. No symbol metadata is consulted.
 def locate_symbol(data: bytes):
     match = locate_signature(data)
     return (
         match["file_offset"],
         0,
         0,
-        f"section[{match['section_index']}]",
-        "unique-executable-signature",
+        "whole-file-aarch64-scan",
+        "unique-full-instruction-signature",
         1,
     )
+
+
+def patch_bytes(raw: bytes, function_off: int) -> bytes:
+    result = bytearray(raw)
+    for rel, word in PATCHED.items():
+        struct.pack_into("<I", result, function_off + rel, word)
+    return bytes(result)
+
+
+def verify_only_expected_bytes_changed(before: bytes, after: bytes, function_off: int):
+    if len(before) != len(after):
+        raise ValueError("binary patch changed file size")
+    allowed = set()
+    for rel in PATCHED:
+        base = function_off + rel
+        allowed.update(range(base, base + 4))
+    unexpected = [i for i, (a, b) in enumerate(zip(before, after)) if a != b and i not in allowed]
+    if unexpected:
+        raise ValueError(f"binary patch changed unexpected byte offset 0x{unexpected[0]:x}")
 
 
 def main():
@@ -193,54 +191,54 @@ def main():
     before_words = read_words(raw, function_off)
     before_state = state_of(before_words)
 
-    result = bytearray(raw)
     changed = False
     if args.mode == "patch":
         if before_state == "original":
-            for rel, word in PATCHED.items():
-                struct.pack_into("<I", result, function_off + rel, word)
+            after = patch_bytes(raw, function_off)
+            verify_only_expected_bytes_changed(raw, after, function_off)
             changed = True
-        elif before_state != "patched":
+        elif before_state == "patched":
+            after = raw
+        else:
+            raise SystemExit("Refusing binary patch: audited DHD instruction signature is unknown")
+    else:
+        after = raw
+        if args.mode == "verify" and before_state != "patched":
             raise SystemExit(
-                "Refusing binary patch: audited DHD instruction signature is unknown.\n"
+                f"DHD PKTFWD binary verification failed: state={before_state}\n"
                 + json.dumps(fmt_words(before_words), indent=2)
             )
-    elif args.mode == "verify" and before_state != "patched":
-        raise SystemExit(
-            f"DHD PKTFWD binary verification failed: state={before_state}\n"
-            + json.dumps(fmt_words(before_words), indent=2)
-        )
 
     if changed:
         tmp = path.with_name(path.name + ".tmp-fcd")
-        tmp.write_bytes(result)
+        tmp.write_bytes(after)
         os.chmod(tmp, path.stat().st_mode & 0o7777)
         os.replace(tmp, path)
 
-    after = path.read_bytes()
-    after_sha = sha256(after)
-    after_match = locate_signature(after)
+    final = path.read_bytes()
+    after_sha = sha256(final)
+    after_match = locate_signature(final)
     after_off = after_match["file_offset"]
-    after_words = read_words(after, after_off)
+    after_words = read_words(final, after_off)
     after_state = state_of(after_words)
 
     if after_off != function_off:
         raise SystemExit(
             f"post-operation signature moved: before=0x{function_off:x} after=0x{after_off:x}"
         )
+    if changed:
+        verify_only_expected_bytes_changed(raw, final, function_off)
     if args.mode in ("patch", "verify") and after_state != "patched":
         raise SystemExit(f"post-operation verification failed: state={after_state}")
 
     report = {
         "tool": "FlowCache Doctor DHD PKTFWD prebuilt patcher",
         "patch_revision": PATCH_REVISION,
-        "match_method": "unique-executable-signature",
+        "match_method": "unique-full-instruction-signature",
+        "elf_metadata_dependency": "header-only",
         "file": str(path),
         "mode": args.mode,
         "function_file_offset": f"0x{after_off:x}",
-        "section_index": after_match["section_index"],
-        "section_offset": f"0x{after_match['section_offset']:x}",
-        "section_size": after_match["section_size"],
         "state_before": before_state,
         "state_after": after_state,
         "changed": changed,
