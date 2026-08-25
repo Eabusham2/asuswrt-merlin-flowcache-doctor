@@ -171,7 +171,8 @@ stop(){
   [ -n "$_p" ] && kill "$_p" 2>/dev/null
   sleep 1
   rm -f "$PIDFILE"
-  rmdir "$LOCK" 2>/dev/null
+  rmdir "$LOCK" 2>/dev/null || true
+  return 0
 }
 
 status(){
