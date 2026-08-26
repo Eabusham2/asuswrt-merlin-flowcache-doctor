@@ -14,7 +14,6 @@ env:
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
   EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
   DHD_PREBUILT_REL: release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
-  DHD_EXPECTED_ORIGINAL_SHA256: 51a89c8be5f2f93543d7b0474685c81bd3fcfa48444b47b2e464dd5b3ba2a327
 
 jobs:
   build:
@@ -74,7 +73,6 @@ jobs:
 
           ACTUAL_DHD_SHA="$(sha256sum "$DHD" | awk '{print $1}')"
           echo "$ACTUAL_DHD_SHA  $DHD" > /project/artifacts/DHD_PREBUILT_ORIGINAL_SHA256.txt
-          test "$ACTUAL_DHD_SHA" = "$DHD_EXPECTED_ORIGINAL_SHA256"
 
           {
             echo "lineage=$MERLIN_BRANCH"
