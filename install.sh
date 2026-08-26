@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.4-mlo-runner-heal
+VERSION=1.0.5-d3lut-relearn
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -82,9 +82,11 @@ FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
 
 # Automatic MLO Runner stale-state repair. Triggered only by client lifecycle/reinit events.
-# It waits for the MLO session to settle, then invalidates only that client's HW-offloaded flows.
+# First force a per-client bridge relearn so patched wlshared globally removes stale DHD D3LUT state,
+# then invalidate only that client's hardware FlowCache entries. The station remains associated.
 # No global FlowCache flush, Runner cycle, Wi-Fi restart, steering, or deauthentication is performed.
 FCD_MLO_HW_HEAL=1
+FCD_MLO_D3LUT_RELEARN=1
 FCD_MLO_HW_SETTLE=3
 FCD_MLO_HW_COOLDOWN=60
 FCD_MLO_KERNEL_EVENTS=1
@@ -148,8 +150,8 @@ rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
 echo "Backup of the previous version: $BACKUP"
 if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
-  echo "MLO Runner hardware stale-state healer: active"
+  echo "MLO Runner + D3LUT stale-state healer: active"
 else
-  echo "MLO Runner hardware stale-state healer: armed; waiting for event source"
+  echo "MLO Runner + D3LUT stale-state healer: armed; waiting for event source"
 fi
 echo "Run: /jffs/scripts/roamctl clients"
