@@ -47,7 +47,7 @@ jobs:
             "+refs/heads/${MERLIN_BRANCH}:refs/remotes/origin/${MERLIN_BRANCH}"
 
           VERSION_PATH=release/src-rt/version.conf
-          TARGET=release/src-rt-5.04behnd.4916/target.mak
+          BUILD_ALL=tools/build-all
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           PKTFWD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
@@ -76,10 +76,12 @@ jobs:
             git cat-file -e "${sha}:${PKTFWD}" 2>/dev/null || continue
             git cat-file -e "${sha}:${AFCD}" 2>/dev/null || continue
             git cat-file -e "${sha}:${LOCPO}" 2>/dev/null || continue
+            git cat-file -e "${sha}:${BUILD_ALL}" 2>/dev/null || continue
 
-            target_text="$(git show "${sha}:${TARGET}" 2>/dev/null)" || continue
+            build_all_text="$(git show "${sha}:${BUILD_ALL}" 2>/dev/null)" || continue
             chip_text="$(git show "${sha}:${CHIP}" 2>/dev/null)" || continue
-            grep -q '^export GT-BE19000AI[[:space:]]*:=' <<<"$target_text" || continue
+            grep -q '^BRANCH_GTBE19000AI=asuswrt6$' <<<"$build_all_text" || continue
+            grep -Fq 'elif [ "$FWMODEL" = "gt-be19000ai" ] ; then' <<<"$build_all_text" || continue
             grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' <<<"$chip_text" || continue
 
             SELECTED="$sha"
@@ -134,13 +136,14 @@ jobs:
         run: |
           set -euo pipefail
           cd /project/merlin
-          TARGET=release/src-rt-5.04behnd.4916/target.mak
+          BUILD_ALL=tools/build-all
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
 
           test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
-          grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+          grep -q '^BRANCH_GTBE19000AI=asuswrt6$' "$BUILD_ALL"
+          grep -Fq 'elif [ "$FWMODEL" = "gt-be19000ai" ] ; then' "$BUILD_ALL"
           grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
           test -s "$MODEL_CFG"
           grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
@@ -155,7 +158,8 @@ jobs:
             echo "version=$EXPECTED_VERSION"
             grep -E '^(SERIALNO|EXTENDNO|RCNO)=' "$VERSION"
             grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
-            grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+            grep '^BRANCH_GTBE19000AI=' "$BUILD_ALL"
+            grep -F 'elif [ "$FWMODEL" = "gt-be19000ai" ] ; then' "$BUILD_ALL"
           } > /project/artifacts/BASELINE_VERIFICATION.txt
 
       - name: Apply and verify PKTFWD fix
