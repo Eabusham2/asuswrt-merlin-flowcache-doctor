@@ -1,4 +1,4 @@
-name: Workflow parser smoke
+name: Build GT-BE19000AI Runner repair
 
 on:
   push:
@@ -8,9 +8,127 @@ on:
       - .github/workflows/workflow-parser-smoke.yml
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
+  EXPECTED_VERSION: 3006.102.8_4
+  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
+  FCD_D3LUT_MARKER: FCD_DHD_D3LUT_REPAIR_V1
+
 jobs:
-  smoke:
+  build:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: gnuton/asuswrt-merlin-toolchains-docker:latest
+      options: --user root
+      volumes:
+        - /mnt:/project
+
     steps:
-      - name: Confirm parser
-        run: echo workflow-parser-ok
+      - name: Checkout repair tools
+        uses: actions/checkout@v4
+
+      - name: Prepare exact Merlin source and apply repair
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /project/merlin /project/artifacts /project/build-gt-be19000ai.sh
+          mkdir -p /project/artifacts
+          cd /project
+          git init merlin
+          cd merlin
+          git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
+          git fetch --depth 1 origin "$MERLIN_COMMIT"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
+
+          grep -q '^SERIALNO=102.8$' release/src-rt/version.conf
+          grep -q '^EXTENDNO=4$' release/src-rt/version.conf
+          grep -q '^RCNO=0$' release/src-rt/version.conf
+          grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' release/src-rt-5.04behnd.4916/chip_profile.mak
+
+          WLSHARED_MAKE=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/Makefile
+          DHD_MAKE=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_dhd/Makefile
+          DHD_PREBUILT=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
+          SRC=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/wlshared_linux.c
+
+          grep -q 'wlshared-objs := wlshared_linux.o' "$WLSHARED_MAKE"
+          grep -q 'prebuilt := dhd.o' "$DHD_MAKE"
+          test -s "$DHD_PREBUILT"
+          sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256.txt
+
+          python3 "$GITHUB_WORKSPACE/tools/patch-wlshared-d3lut.py" "$SRC"
+          git diff --check
+          git diff -- "$SRC" > /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          test -s /project/artifacts/APPLIED_SOURCE_DIFF.patch
+          grep -q "$FCD_D3LUT_MARKER" "$SRC"
+          grep -q 'dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL)' "$SRC"
+
+          printf '%s\n' "$MERLIN_COMMIT" > /project/artifacts/MERLIN_COMMIT.txt
+          printf '%s\n' "$EXPECTED_VERSION" > /project/artifacts/MERLIN_VERSION.txt
+
+      - name: Build patched firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
+          chown -R docker:docker /project/merlin /project/artifacts /home/docker
+          cat > /project/build-gt-be19000ai.sh <<'BUILD'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          test "$(whoami)" = docker
+          export LD_LIBRARY="${LD_LIBRARY:-}"
+          source /home/docker/envs/bcm-hnd-ax-4.19be.sh
+          cd /project/merlin/release/src-rt-5.04behnd.4916
+          make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
+          BUILD
+          chown docker:docker /project/build-gt-be19000ai.sh
+          chmod 0755 /project/build-gt-be19000ai.sh
+          sudo -u docker -H /project/build-gt-be19000ai.sh
+
+      - name: Verify repair reached built module and firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project/artifacts
+          find /project/merlin/release/src-rt-5.04behnd.4916 -type f \
+            \( -name 'wlshared.o' -o -name 'wlshared.ko' \) -print > WLSHARED_BUILD_OBJECTS.txt
+          test -s WLSHARED_BUILD_OBJECTS.txt
+
+          : > WLSHARED_MARKER_HITS.txt
+          while IFS= read -r obj; do
+            if grep -aFq "$FCD_D3LUT_MARKER" "$obj"; then
+              printf '%s\n' "$obj" >> WLSHARED_MARKER_HITS.txt
+            fi
+          done < WLSHARED_BUILD_OBJECTS.txt
+          test -s WLSHARED_MARKER_HITS.txt
+
+          FIRMWARE=/project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW/$EXPECTED_FIRMWARE
+          test -s "$FIRMWARE"
+          cp -f "$FIRMWARE" .
+          sha256sum "$EXPECTED_FIRMWARE" > FIRMWARE_SHA256.txt
+          sha256sum -c FIRMWARE_SHA256.txt
+          printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
+          {
+            echo 'VERIFIED_FOR_FLASH=YES'
+            echo 'MODEL=GT-BE19000AI'
+            echo "VERSION=$EXPECTED_VERSION"
+            echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
+            echo "FIX=$FCD_D3LUT_MARKER"
+            echo 'PATCH_PATH=source-built-wlshared'
+            echo 'DHD_PATH=prebuilt-unmodified'
+            echo "FLASH_FILE=$EXPECTED_FIRMWARE"
+            echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
+          } > FLASH_MANIFEST.txt
+
+      - name: Preserve build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT-BE19000AI-3006.102.8_4-Runner-D3LUT-repair
+          path: /project/artifacts
+          if-no-files-found: warn
+          retention-days: 14
