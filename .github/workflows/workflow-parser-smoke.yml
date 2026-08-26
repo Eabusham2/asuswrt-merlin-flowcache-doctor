@@ -1,0 +1,16 @@
+name: Workflow parser smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/workflow-parser-smoke.yml
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm parser
+        run: echo workflow-parser-ok
