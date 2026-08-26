@@ -9,10 +9,11 @@ permissions:
 env:
   MERLIN_BRANCH: asuswrt6
   EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
+  FCD_D3LUT_MARKER: FCD_DHD_D3LUT_REPAIR_V1
 
 jobs:
   build:
-    name: GT-BE19000AI patched firmware
+    name: GT-BE19000AI D3LUT repair firmware
     runs-on: ubuntu-latest
     timeout-minutes: 360
     container:
@@ -41,8 +42,6 @@ jobs:
           cd merlin
           git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
 
-          # Fetch asuswrt6 history so we can select the newest real stable release
-          # that actually contains everything required by GT-BE19000AI.
           git fetch --depth 1000 origin \
             "+refs/heads/${MERLIN_BRANCH}:refs/remotes/origin/${MERLIN_BRANCH}"
 
@@ -50,7 +49,10 @@ jobs:
           BUILD_ALL=tools/build-all
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
-          PKTFWD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          WLSHARED=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/wlshared_linux.c
+          WLSHARED_MAKE=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/Makefile
+          DHD_MAKE=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_dhd/Makefile
+          DHD_PREBUILT=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
           AFCD=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           LOCPO=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
 
@@ -58,31 +60,31 @@ jobs:
           SERIAL=""
           EXTEND=""
 
-          # Inspect only commits that changed version.conf. This chooses an actual
-          # release-version point, not a later development commit carrying that version.
           while read -r sha; do
             conf="$(git show "${sha}:${VERSION_PATH}" 2>/dev/null)" || continue
             serial="$(printf '%s\n' "$conf" | sed -n 's/^SERIALNO=//p' | head -n1)"
             extend="$(printf '%s\n' "$conf" | sed -n 's/^EXTENDNO=//p' | head -n1)"
             rcno="$(printf '%s\n' "$conf" | sed -n 's/^RCNO=//p' | head -n1)"
 
-            # Stable only. Skip alpha/beta/RC/dev branch heads.
             [[ "$serial" =~ ^[0-9]+\.[0-9]+$ ]] || continue
             [[ "$extend" =~ ^[0-9]+$ ]] || continue
             [[ "${rcno:-0}" == "0" ]] || continue
 
-            # Device compatibility gate before we spend an hour compiling.
-            git cat-file -e "${sha}:${MODEL_CFG}" 2>/dev/null || continue
-            git cat-file -e "${sha}:${PKTFWD}" 2>/dev/null || continue
-            git cat-file -e "${sha}:${AFCD}" 2>/dev/null || continue
-            git cat-file -e "${sha}:${LOCPO}" 2>/dev/null || continue
-            git cat-file -e "${sha}:${BUILD_ALL}" 2>/dev/null || continue
+            for required in "$MODEL_CFG" "$WLSHARED" "$WLSHARED_MAKE" "$DHD_MAKE" "$DHD_PREBUILT" "$AFCD" "$LOCPO" "$BUILD_ALL"; do
+              git cat-file -e "${sha}:${required}" 2>/dev/null || { required_missing=1; break; }
+              required_missing=0
+            done
+            [ "${required_missing:-0}" = 0 ] || continue
 
             build_all_text="$(git show "${sha}:${BUILD_ALL}" 2>/dev/null)" || continue
             chip_text="$(git show "${sha}:${CHIP}" 2>/dev/null)" || continue
+            wlshared_make_text="$(git show "${sha}:${WLSHARED_MAKE}" 2>/dev/null)" || continue
+            dhd_make_text="$(git show "${sha}:${DHD_MAKE}" 2>/dev/null)" || continue
             grep -q '^BRANCH_GTBE19000AI=asuswrt6$' <<<"$build_all_text" || continue
             grep -Fq 'elif [ "$FWMODEL" = "gt-be19000ai" ] ; then' <<<"$build_all_text" || continue
             grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' <<<"$chip_text" || continue
+            grep -q 'wlshared-objs := wlshared_linux.o' <<<"$wlshared_make_text" || continue
+            grep -q 'prebuilt := dhd.o' <<<"$dhd_make_text" || continue
 
             SELECTED="$sha"
             SERIAL="$serial"
@@ -91,7 +93,7 @@ jobs:
           done < <(git log --format=%H "refs/remotes/origin/${MERLIN_BRANCH}" -- "$VERSION_PATH")
 
           if [ -z "$SELECTED" ]; then
-            echo "No stable GT-BE19000AI-compatible release found in ${MERLIN_BRANCH} history." >&2
+            echo "No stable GT-BE19000AI-compatible release with the source-built wlshared repair point was found." >&2
             exit 1
           fi
 
@@ -121,7 +123,7 @@ jobs:
           printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
           {
             echo "AUTO_RELEASE_SELECTION=YES"
-            echo "POLICY=latest-stable-compatible"
+            echo "POLICY=latest-stable-compatible-wlshared"
             echo "LINEAGE=$MERLIN_BRANCH"
             echo "COMMIT=$SELECTED"
             echo "VERSION=$VERSION"
@@ -131,7 +133,7 @@ jobs:
           echo "Selected latest stable compatible release: $VERSION"
           echo "Selected upstream commit: $SELECTED"
 
-      - name: Verify GT-BE19000AI baseline
+      - name: Verify GT-BE19000AI build path
         shell: bash
         run: |
           set -euo pipefail
@@ -140,6 +142,9 @@ jobs:
           CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
           MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
           VERSION=release/src-rt/version.conf
+          WLSHARED_MAKE=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/Makefile
+          DHD_MAKE=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_dhd/Makefile
+          DHD_PREBUILT=release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
 
           test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
           grep -q '^BRANCH_GTBE19000AI=asuswrt6$' "$BUILD_ALL"
@@ -149,9 +154,13 @@ jobs:
           grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
           grep -q '^RCNO=0$' "$VERSION"
+          grep -q 'wlshared-objs := wlshared_linux.o' "$WLSHARED_MAKE"
+          grep -q 'prebuilt := dhd.o' "$DHD_MAKE"
+          test -s "$DHD_PREBUILT"
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/afcd/prebuilt/GT-BE19000AI/afcd
           test -s release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/impl103/main/components/apps/locpold/prebuilt/GT-BE19000AI/bin/locpold
 
+          sha256sum "$DHD_PREBUILT" > /project/artifacts/DHD_PREBUILT_SHA256.txt
           {
             echo "lineage=$MERLIN_BRANCH"
             echo "commit=$MERLIN_COMMIT"
@@ -160,46 +169,79 @@ jobs:
             grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
             grep '^BRANCH_GTBE19000AI=' "$BUILD_ALL"
             grep -F 'elif [ "$FWMODEL" = "gt-be19000ai" ] ; then' "$BUILD_ALL"
+            echo "wlshared=source-built"
+            echo "dhd=prebuilt"
           } > /project/artifacts/BASELINE_VERIFICATION.txt
 
-      - name: Apply and verify PKTFWD fix
+      - name: Apply source-built wlshared D3LUT repair
         shell: bash
         run: |
           set -euo pipefail
-          REL=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
+          REL=release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/wlshared_linux.c
           SRC=/project/merlin/$REL
           printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
 
-          python3 - "$SRC" <<'PY'
-          import re
+          python3 - "$SRC" "$FCD_D3LUT_MARKER" <<'PY'
           import sys
           from pathlib import Path
 
           p = Path(sys.argv[1])
+          marker = sys.argv[2]
           text = p.read_text()
-          pattern = re.compile(r'(?m)^(\s*)if \(param2 == WLC_E_ASSOC\) \{$')
-          matches = list(pattern.finditer(text))
-          if len(matches) != 1:
-              raise SystemExit(f"expected exactly one WLC_E_ASSOC cleanup gate, found {len(matches)}")
+          if marker in text:
+              raise SystemExit("repair marker unexpectedly already present upstream")
 
-          indent = matches[0].group(1)
-          replacement = (
-              f"{indent}if ((param2 == WLC_E_ASSOC) ||\n"
-              f"{indent}    (param2 == WLC_E_ASSOC_IND) ||\n"
-              f"{indent}    (param2 == WLC_E_REASSOC) ||\n"
-              f"{indent}    (param2 == WLC_E_REASSOC_IND)) {{"
-          )
-          p.write_text(pattern.sub(replacement, text, count=1))
+          old = '''\t/* function is for dhd device */
+\t/* dhd or eth devices */
+\tif (dhd_pktc_req_hook && (is_netdev_wlan_dhd(dev) || !is_netdev_wlan(dev)))
+\t\tdhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT, (unsigned long)(fdb_info->addr),
+\t\t\t(unsigned long)dev, (unsigned long)event);'''
+          new = '''\t/* function is for dhd device */
+\t/* dhd or eth devices */
+\tif (dhd_pktc_req_hook && (is_netdev_wlan_dhd(dev) || !is_netdev_wlan(dev))) {
+\t\t/*
+\t\t * FCD_DHD_D3LUT_REPAIR_V1
+\t\t *
+\t\t * GT-BE19000AI uses a prebuilt DHD object.  Its PKTFWD association
+\t\t * request globally deletes D3LUT state for WLC_E_ASSOC only, so MLO
+\t\t * reassociation/source-move sequences can retain a MAC in an old
+\t\t * radio pool.  Bridge FDB lifecycle notifications are visible here
+\t\t * in source-built wlshared.  For DHD FDB add/delete, use the exported
+\t\t * delete hook with net_device == NULL so PKTFWD searches the global
+\t\t * pool instead of trusting a possibly stale radio/device mapping.
+\t\t */
+\t\tif (is_netdev_wlan_dhd(dev) && dhd_pktc_del_hook &&
+\t\t    ((event == SWITCHDEV_FDB_ADD_TO_DEVICE) ||
+\t\t     (event == SWITCHDEV_FDB_DEL_TO_DEVICE))) {
+\t\t\tdhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL);
+\t\t\treturn 0;
+\t\t}
+
+\t\tdhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT, (unsigned long)(fdb_info->addr),
+\t\t\t(unsigned long)dev, (unsigned long)event);
+\t}'''
+
+          if text.count(old) != 1:
+              raise SystemExit(f"expected exactly one dhd switchdev bridge block, found {text.count(old)}")
+          text = text.replace(old, new, 1)
+
+          old_init = 'printk("Loading wlshared Module...\\n");'
+          new_init = f'printk("Loading wlshared Module ({marker})...\\n");'
+          if text.count(old_init) != 1:
+              raise SystemExit(f"expected exactly one wlshared load marker, found {text.count(old_init)}")
+          text = text.replace(old_init, new_init, 1)
+          p.write_text(text)
           PY
 
           cd /project/merlin
           git diff --check
           git diff -- "$REL" > /project/artifacts/APPLIED_SOURCE_DIFF.patch
           test -s /project/artifacts/APPLIED_SOURCE_DIFF.patch
-          grep -A14 -B3 'case dhd_pktfwd_req_assoc_sta_e' "$SRC" > /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
-          grep -q 'param2 == WLC_E_ASSOC_IND' "$SRC"
-          grep -q 'param2 == WLC_E_REASSOC' "$SRC"
-          grep -q 'param2 == WLC_E_REASSOC_IND' "$SRC"
+          grep -A34 -B4 'FCD_DHD_D3LUT_REPAIR_V1' "$SRC" > /project/artifacts/PATCHED_SOURCE_SNIPPET.txt
+          grep -q 'dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL)' "$SRC"
+          grep -q 'SWITCHDEV_FDB_ADD_TO_DEVICE' "$SRC"
+          grep -q 'SWITCHDEV_FDB_DEL_TO_DEVICE' "$SRC"
+          grep -q "$FCD_D3LUT_MARKER" "$SRC"
 
       - name: Build GT-BE19000AI and preserve exit code
         shell: bash
@@ -232,7 +274,6 @@ jobs:
           printf '%s\n' "$rc" > /project/artifacts/MAKE_EXIT_CODE.txt
           echo "Merlin make exit code: $rc"
 
-          # Always let salvage run before final green/red decision.
           exit 0
 
       - name: Salvage build outputs and diagnostics
@@ -263,17 +304,26 @@ jobs:
           fi
 
           if [ -s /project/artifacts/BUILD.log ]; then
-            tail -n 1000 /project/artifacts/BUILD.log > /project/artifacts/BUILD_TAIL.log
+            tail -n 1200 /project/artifacts/BUILD.log > /project/artifacts/BUILD_TAIL.log
+            grep -E 'wlshared_linux\.(c|o)|wlshared\.(o|ko)' /project/artifacts/BUILD.log \
+              > /project/artifacts/WLSHARED_BUILD_LOG.txt 2>/dev/null || true
           else
             echo "BUILD.log not created" > /project/artifacts/BUILD_TAIL.log
+            : > /project/artifacts/WLSHARED_BUILD_LOG.txt
           fi
 
-          if [ -d /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl ]; then
-            find /project/merlin/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl \
-              -type f \( -name 'dhd_pktfwd.o' -o -name 'dhd*.ko' -o -name '*pktfwd*.o' \) -print \
-              > /project/artifacts/DHD_BUILD_OBJECTS.txt 2>/dev/null
-          else
-            echo "wl build tree unavailable" > /project/artifacts/DHD_BUILD_OBJECTS.txt
+          : > /project/artifacts/WLSHARED_BUILD_OBJECTS.txt
+          : > /project/artifacts/WLSHARED_MARKER_HITS.txt
+          if [ -d /project/merlin/release/src-rt-5.04behnd.4916 ]; then
+            find /project/merlin/release/src-rt-5.04behnd.4916 -type f \
+              \( -name 'wlshared.o' -o -name 'wlshared.ko' \) -print \
+              > /project/artifacts/WLSHARED_BUILD_OBJECTS.txt 2>/dev/null
+            while IFS= read -r f; do
+              [ -f "$f" ] || continue
+              if grep -aFq "$FCD_D3LUT_MARKER" "$f" 2>/dev/null; then
+                printf '%s\n' "$f" >> /project/artifacts/WLSHARED_MARKER_HITS.txt
+              fi
+            done < /project/artifacts/WLSHARED_BUILD_OBJECTS.txt
           fi
 
           chmod -R a+rX /project/artifacts 2>/dev/null || true
@@ -296,19 +346,25 @@ jobs:
           grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" BASELINE_VERIFICATION.txt
           grep -q '^RCNO=0$' BASELINE_VERIFICATION.txt
           grep -q "version=${EXPECTED_VERSION}" BASELINE_VERIFICATION.txt
-          grep -q 'WLC_E_ASSOC_IND' APPLIED_SOURCE_DIFF.patch
-          grep -q 'WLC_E_REASSOC' APPLIED_SOURCE_DIFF.patch
-          grep -q 'WLC_E_REASSOC_IND' APPLIED_SOURCE_DIFF.patch
+          grep -q 'wlshared=source-built' BASELINE_VERIFICATION.txt
+          grep -q 'dhd=prebuilt' BASELINE_VERIFICATION.txt
+          grep -q 'FCD_DHD_D3LUT_REPAIR_V1' APPLIED_SOURCE_DIFF.patch
+          grep -q 'dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL)' APPLIED_SOURCE_DIFF.patch
+          test -s WLSHARED_BUILD_OBJECTS.txt
+          test -s WLSHARED_MARKER_HITS.txt
 
           printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
           {
             echo "VERIFIED_FOR_FLASH=YES"
             echo "AUTO_RELEASE_SELECTION=YES"
-            echo "RELEASE_POLICY=latest-stable-compatible"
+            echo "RELEASE_POLICY=latest-stable-compatible-wlshared"
             echo "MODEL=GT-BE19000AI"
             echo "VERSION=$EXPECTED_VERSION"
             echo "UPSTREAM_LINEAGE=$MERLIN_BRANCH"
             echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
+            echo "FIX=$FCD_D3LUT_MARKER"
+            echo "PATCH_PATH=source-built-wlshared"
+            echo "DHD_PATH=prebuilt-unmodified"
             echo "FLASH_FILE=$EXPECTED_FIRMWARE"
             echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
           } > FLASH_MANIFEST.txt
@@ -317,7 +373,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: GT-BE19000AI-${{ steps.resolve.outputs.version }}-pktfwd-patched-${{ github.run_number }}
+          name: GT-BE19000AI-${{ steps.resolve.outputs.version }}-d3lut-repair-${{ github.run_number }}
           path: /project/artifacts
           if-no-files-found: error
           retention-days: 14
