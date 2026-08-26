@@ -44,7 +44,7 @@ cat > "$T/bin/ls" <<'EOS'
 #!/bin/sh
 if [ "$1" = /sys/class/net/br0/brif ]; then printf 'wl0.1\nwl1.1\nwl2.1\n'; else /usr/bin/ls "$@"; fi
 EOS
-for x in fcctl logger brctl; do cat > "$T/bin/$x" <<'EOS'
+for x in fcctl logger brctl bridge; do cat > "$T/bin/$x" <<'EOS'
 #!/bin/sh
 :
 EOS
@@ -56,7 +56,7 @@ chmod +x /jffs/scripts/roam-detect.sh
 printf '#!/bin/sh\ncru a roam-detect-wd "* * * * * /jffs/scripts/old"\n' > /jffs/scripts/services-start
 chmod +x /jffs/scripts/services-start
 busybox sh "$ROOT/install.sh"
-/jffs/scripts/roamctl status | grep -q '1.0.4-mlo-runner-heal'
+/jffs/scripts/roamctl status | grep -q '1.0.5-d3lut-relearn'
 /jffs/scripts/roamctl health | grep -q healthy
 /jffs/scripts/fcd-mlo-runner-heal.sh status | grep -q 'running'
 [ ! -e /jffs/scripts/roam-detect.sh ]
@@ -65,6 +65,7 @@ busybox sh "$ROOT/install.sh"
 [ -f /jffs/scripts/flowcache-doctor.conf ]
 grep -q 'FCD_CONFIRMATIONS=5' /jffs/scripts/flowcache-doctor.conf
 grep -q 'FCD_MLO_HW_HEAL=1' /jffs/scripts/flowcache-doctor.conf
+grep -q 'FCD_MLO_D3LUT_RELEARN=1' /jffs/scripts/flowcache-doctor.conf
 grep -q 'FCD_MLO_HW_SETTLE=3' /jffs/scripts/flowcache-doctor.conf
 grep -q 'flowcache-doctor-mlo-hw-watchdog' "$T/cron"
 grep -q 'fcd-mlo-runner-heal.sh start' /jffs/scripts/services-start
