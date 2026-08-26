@@ -9,7 +9,7 @@ cru d flowcache-doctor-mlo-hw-watchdog 2>/dev/null
 [ -f "$SS" ] && sed -i '/roamctl boot/d; /flowcache-doctor-watchdog/d; /fcd-mlo-runner-heal.sh start/d; /flowcache-doctor-mlo-hw-watchdog/d' "$SS"
 [ -f "$PROFILE" ] && sed -i '/alias roamctl=.*flowcache-doctor/d' "$PROFILE"
 rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
-  "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/roamctl" \
+  "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/fcd-wired-incident.sh" "$DEST/roamctl" \
   "$DEST/flowcache-doctor.conf" "$DEST/flowcache-doctor-uninstall.sh" \
   "$DEST/flowcache-doctor.disabled"
 rm -rf /tmp/flowcache-doctor
