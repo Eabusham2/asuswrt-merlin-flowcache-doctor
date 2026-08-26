@@ -1,95 +1,102 @@
-# Flowcache Doctor — automatic MLO-safe fork
+# Flowcache Doctor — GT-BE19000AI MLO / Runner stale-state repair
 
-This fork heals Broadcom per-client flow-cache blackholes for **positively identified non-MLO associations** while protecting active Wi-Fi 7/MLO and uncertain clients.
+This fork diagnoses and heals Broadcom per-client forwarding/offload failures while staying fail-closed around uncertain Wi-Fi 7/MLO state.
 
-## Safety model
+The current GT-BE19000AI work has two complementary paths:
 
-- **One-, two-, and three-link MLO are protected.** Same-MAC multi-radio membership, MLO/MLD/link metadata, nonzero EML capability, and MLO tables are treated as MLO evidence.
-- **Every active EHT/802.11be/Wi-Fi 7 station is protected**, including an MLO device currently using only one visible link.
-- **Unknown is treated as an MLO-safe fallback.** Missing, unfamiliar, or temporarily unavailable Broadcom output never becomes permission to flush.
-- The fallback is not permanently sticky: if later polls positively prove a current pre-EHT association, the client can qualify automatically without a device list.
-- Non-MLO healing is automatic only after five consecutive current observations explicitly report a negotiated pre-EHT mode such as `N_CAP`, `VHT_CAP`, or `HE_CAP` and no MLO/EHT evidence is present.
-- There is exactly one executable `fcctl flush --mac` path. It performs a fresh classification, confirmation, and single-radio check immediately before each initial or delayed flush.
-- The event listener never flushes; it only queues events for the safety-gated poller.
-- Production runtime contains no concrete client MAC addresses. Clients are discovered dynamically from Broadcom association and bridge state.
-- Generated event logs and utilization incident captures are retained for 30 days.
+- **Compiled firmware repair:** source-built `wlshared` globally invalidates DHD PKTFWD D3LUT state for a station MAC on DHD bridge-FDB lifecycle events. The proprietary DHD prebuilt remains unmodified.
+- **JFFS runtime healer:** after a positively identified MLO/EHT lifecycle event, it forces a bridge relearn for only that client and then invalidates only that client's hardware FlowCache entries.
 
-No shell workaround can provide a mathematical guarantee against undocumented Broadcom output changing. This implementation is fail-closed: ambiguity disables healing for that client instead of risking an MLO flush.
+This specifically targets the reproduced failure where local Wi-Fi remains fast but routed WAN upload collapses until Runner hardware acceleration is reset.
 
-## Utilization/drop diagnosis
+## GT-BE19000AI D3LUT / Runner repair
 
-Version 1.0.3 passively monitors Broadcom CHANIM telemetry and records:
+GT-BE19000AI links a prebuilt DHD object, so editing `dhd_pktfwd.c` alone does not change the shipped DHD module. The firmware workflow instead patches source-built `shared/impl1/wlshared_linux.c` to call the DHD-exported delete hook with a `NULL` net device:
 
-- `UTIL-SPIKE` when busy utilization changes by at least 20 percentage points.
-- `UTIL-HIGH` when utilization crosses 85%.
-- `UTIL-RECOVER` when it falls back to 65% or lower.
-- The complete CHANIM breakdown: AP transmit duration, own-BSS airtime, other-BSS airtime, uncategorized/non-packet energy, transmit opportunities, good/bad transmit duration, glitches, bad PLCP, noise, idle, and busy.
-- Radio utilization snapshots alongside roam, stale-FDB, and per-client healing events.
-
-A spike/high event launches a background incident capture with six samples over roughly ten seconds. It stores:
-
-- All-band CHANIM samples and channel changes.
-- Per-client classification, RSSI, rates, sent packets, retries, exhausted retries, and failures.
-- Retry deltas/rates over the incident window.
-- WAN-gateway reachability, public-IP reachability, and the configured LAN DNS-server probe.
-- Bridge FDB, selected Broadcom counters, flow-cache status, process state, NVRAM size, kernel messages, and recent syslog.
-
-The summary classifies the likely family:
-
-- `other-wifi-contention`
-- `nonwifi-or-undecodable-energy`
-- `local-airtime-or-retries`
-- `driver-or-counter-anomaly`
-- `mixed-high-airtime`
-- `mixed-or-transient`
-
-These labels are conservative heuristics, not proof. The raw capture remains the source of truth.
-
-This monitoring **never** force-steers, deauthenticates, restarts Wi-Fi, changes channels, or flushes an entire radio. That is intentional: an automatic radio restart or channel change could interrupt MLO and destroy the evidence needed to identify the actual cause.
-
-## Using incident captures
-
-```sh
-roamctl util
-roamctl capture manual-check
-roamctl incidents
-roamctl incident latest
-roamctl log 100
+```c
+dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL);
 ```
 
-Incident directories are under:
+The DHD PKTFWD implementation explicitly interprets `NULL` as a global D3LUT-pool lookup. That avoids trusting a stale radio/device mapping—the same failure family suggested by historical pool/unit mismatch logs.
+
+The compiled repair marker is:
 
 ```text
-/jffs/flowcache-doctor/incidents/
+FCD_DHD_D3LUT_REPAIR_V1
 ```
 
-The generated summary gives a cause-specific next action:
+See:
 
-- Other Wi-Fi contention: use ASUS WiFi Insight at the incident timestamp and choose a quieter channel.
-- Non-Wi-Fi energy: check WiFi Insight's non-WiFi layer and nearby emitters.
-- Local retries: inspect `retry-analysis.tsv` and address the top retrying client.
-- Driver/counter anomaly or simultaneous high utilization on independent bands: correlate with WiFi Insight/Interference Detect and channel-change events. Repeated incidents support disabling Interference Detect for a controlled test and reporting the capture to ASUS/Broadcom.
-- Public-IP success plus DNS failure: treat the outage as DNS/service failure, not RF congestion.
+- `docs/gt-be19000ai-pktfwd-source-patch.md`
+- `docs/build-patched-firmware-with-github-actions.md`
+- `docs/FIRMWARE_UPDATE_POLICY.md`
 
-## Band selection
+## MLO runtime safety model
 
-The add-on does **not force-steer** clients. ASUS Smart Connect/BSD owns steering and has information the shell does not, while target-band RSSI cannot be measured before a client associates. `roamctl advise` reports current RSSI, rates, congestion, and classification without disconnecting anything.
+- One-, two-, and three-link MLO are treated as protected identities.
+- Active EHT/802.11be evidence is MLO-positive evidence even if only one link is currently visible.
+- Unknown output stays fail-closed; it is never silently treated as legacy Wi-Fi.
+- Legacy/pre-EHT healing still requires repeated positive evidence before a normal per-client flush can occur.
+- Production runtime contains no hard-coded client MAC addresses.
+- The MLO healer operates only on a positively identified MLO/EHT client after a lifecycle/reinit event.
+- Its repair is narrow: one client FDB relearn plus `fcctl flush --hw --mac <client>`.
+- It never automatically performs a global FlowCache flush, Runner cycle, Wi-Fi restart, force-steer, or deauthentication.
 
-## Install or update
+No shell parser can mathematically guarantee behavior against undocumented future Broadcom output. Ambiguity therefore disables the special action rather than broadening it.
+
+## Install or update JFFS component
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
 ```
 
-Existing installations can use:
+Existing installations can also use:
 
 ```sh
 roamctl update
 ```
 
-The installer stops and backs up the old version, replaces it atomically, removes obsolete upstream runtime files, installs safe defaults, starts the daemons, and runs a health check.
+Current installer release: `1.0.5-d3lut-relearn`.
 
-## Commands
+The installer backs up the previous installation, replaces files atomically, removes obsolete runtime files, installs safe defaults, starts the daemons, and runs a health check.
+
+## Default MLO repair configuration
+
+```sh
+FCD_MLO_HW_HEAL=1
+FCD_MLO_D3LUT_RELEARN=1
+FCD_MLO_HW_SETTLE=3
+FCD_MLO_HW_COOLDOWN=60
+FCD_MLO_KERNEL_EVENTS=1
+```
+
+On an eligible event the sequence is:
+
+```text
+MLO/EHT lifecycle event
+  -> settle/debounce
+  -> positive MLO/EHT classification
+  -> delete only that MAC's bridge FDB entry
+  -> patched wlshared calls DHD global D3LUT delete hook
+  -> bridge/D3LUT relearn on subsequent traffic
+  -> fcctl flush --hw --mac <same MAC>
+```
+
+If the router lacks the `bridge` userspace command, the script degrades safely to the existing per-client FlowCache hardware flush. The firmware-side repair still applies to natural bridge FDB lifecycle events.
+
+## Utilization/drop diagnosis
+
+The add-on passively monitors Broadcom CHANIM telemetry and records high/spiking airtime plus incident snapshots. Captures can include:
+
+- all-band CHANIM/channel state;
+- per-client classification, RSSI, rates and retry/failure counters;
+- retry deltas over the incident window;
+- WAN-gateway, public-IP and configured LAN-DNS reachability;
+- bridge FDB, FlowCache status, selected Broadcom counters, kernel messages and recent syslog.
+
+These captures are evidence gathering only. They do not force channel changes or radio restarts.
+
+Useful commands:
 
 ```sh
 roamctl status
@@ -105,37 +112,38 @@ roamctl update
 roamctl uninstall
 ```
 
-`roamctl clients` shows automatic classification and confirmation progress, such as `3/5` or `5/5`.
+Incident directories are stored under:
 
-## Default configuration
-
-```sh
-FCD_INTERVAL=2
-FCD_CONFIRMATIONS=5
-FCD_CONFIRM_MAX_AGE=8
-FCD_AUTOFIX=1
-FCD_EVENT_HEAL=1
-FCD_MIN_GAP=8
-FCD_COOLDOWN=60
-FCD_PENDING_TTL=60
-FCD_SETTLE_FLUSHES="20 60 300"
-FCD_LOG_RETENTION_DAYS=30
-FCD_STEER_MODE=advisor
-FCD_LOG_SYSLOG=0
-FCD_BSSLIST=auto
-
-FCD_UTIL_HIGH=85
-FCD_UTIL_RECOVER=65
-FCD_UTIL_SPIKE_DELTA=20
-FCD_UTIL_LOG_COOLDOWN=60
-FCD_INCIDENT_CAPTURE=1
-FCD_INCIDENT_SAMPLES=6
-FCD_INCIDENT_SAMPLE_INTERVAL=2
-FCD_INCIDENT_COOLDOWN=120
-FCD_PROBE_IP=1.1.1.1
+```text
+/jffs/flowcache-doctor/incidents/
 ```
 
+## Build custom firmware
+
+Use GitHub Actions workflow:
+
+```text
+Build patched GT-BE19000AI firmware
+```
+
+Start a **fresh** run from current `main`. A successful artifact must contain a `FLASH_MANIFEST.txt` with:
+
+```text
+VERIFIED_FOR_FLASH=YES
+FIX=FCD_DHD_D3LUT_REPAIR_V1
+PATCH_PATH=source-built-wlshared
+DHD_PATH=prebuilt-unmodified
+```
+
+The workflow also checks that the repair marker exists in compiled `wlshared.o`/`wlshared.ko`, preventing the earlier mistake where a source diff existed but the GT-BE19000AI image actually linked a prebuilt DHD.
+
+Flash only the normal generated `*_emmc_squashfs.pkgtb`, never the GitHub artifact ZIP or `_loader.pkgtb` for a normal upgrade.
+
 ## Tests and audits
+
+The push CI executes the shell/runtime suite, including the dedicated MLO Runner+D3LUT healer test and installer lifecycle test.
+
+Key direct tests include:
 
 ```sh
 tests/audit-static.sh
@@ -143,8 +151,17 @@ python3 tests/audit-line-by-line-1.py
 python3 tests/audit-line-by-line-2.py
 tests/test-runtime.sh
 tests/test-mlo-safety.sh
+tests/test-mlo-runner-heal.sh
 tests/test-gtbe19000ai-live-format.sh
 tests/test-incident-capture.sh
+tests/test-airiq-guard.sh
+tests/test-airiq-time-cap.sh
 tests/test-no-runtime-macs.sh
 tests/test-daemon-sim.sh
 ```
+
+## Scope
+
+The current compiled fix is for stale host-side DHD PKTFWD D3LUT / Runner hardware state. It intentionally keeps Runner/WFD/FlowCache enabled.
+
+It is not presented as a fix for independent far-range RF/FEM/antenna weakness, AT&T/BGW/public-route loss, or every loaded-latency issue. Those remain separate investigation phases after the routed-upload bug is validated.
