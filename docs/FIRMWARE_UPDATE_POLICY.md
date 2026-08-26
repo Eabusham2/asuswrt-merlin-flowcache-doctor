@@ -1,53 +1,57 @@
 # GT-BE19000AI firmware update policy
 
-This is the project rule for future source-level firmware changes.
+This is the project rule for future compiled firmware changes.
 
 ## Permanent workflow
 
-1. **Do not compile firmware on the router or ASUS AI Board.** Use GitHub Actions so a Mac only needs to start the workflow and download the result.
-2. **Do not treat JFFS add-ons and firmware source patches as the same thing.** Shell/add-on code under `/jffs` can be installed without flashing. Changes to compiled Broadcom/ASUS/Merlin code must be represented in the binary that the firmware actually links.
-3. **Use the model's actual Merlin source lineage.** GT-BE19000AI is maintained from Merlin's `asuswrt6` lineage; a same-named generic release tag on another lineage is not sufficient.
-4. **Automatically select the newest stable GT-BE19000AI-compatible Merlin release.** The workflow inspects `asuswrt6` release-version commits newest-to-oldest and selects the first stable release (`SERIALNO` numeric, `EXTENDNO` numeric, `RCNO=0`) whose tree contains the GT-BE19000AI target, chip profile, model configuration, required model prebuilts, PKTFWD reference source, and the model's prebuilt DHD object. Alpha, beta, RC, and development heads are rejected automatically.
-5. **Pin the selected release to its immutable upstream commit SHA for that run.** Never compile a moving branch head. Record the resolved version, lineage, commit, and expected firmware filename in `RELEASE_RESOLUTION.txt` and the final manifest.
-6. **Verify the resolved release identity before compiling.** CI checks `release/src-rt/version.conf`, the GT-BE19000AI entry in `target.mak`, chip profile, model configuration, required model-specific prebuilts, and the exact selected commit.
-7. **Run only the Broadcom/Merlin compile as non-root `docker`.** Broadcom's `prebuild_checks.mk` intentionally rejects root builds. Keep the surrounding GitHub Actions container as root so Actions such as `upload-artifact` can write runner command files; explicitly drop to `docker` for `make`.
-8. **Do not destructively replace the toolchain directory.** Use the known working non-destructive `/opt/toolchains` mapping; never `rm -rf /opt/toolchains` as build setup.
-9. **Treat the open `dhd_pktfwd.c` edit as reference/provenance, not binary proof.** On GT-BE19000AI 3006.102.8_4, Merlin's DHD Makefile selects `REBUILD_DHD_MODULE=0` and links a model-specific prebuilt whole `dhd.o`. Therefore editing `shared/impl1/dhd_pktfwd.c` alone does not put the change into `dhd.ko`.
-10. **Patch the exact prebuilt DHD object that Merlin actually links.** The effective PKTFWD fix is applied to `router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o` with `tools/patch_dhd_pktfwd_prebuilt.py`. The tool must locate `dhd_pktfwd_request` through ELF metadata, require the exact known AArch64 instruction signature, refuse unknown binaries, make only the verified same-size instruction changes, and verify the patched signature immediately afterward. **Binary patch revision 1 is permanently invalid. Only revision 2 or a later separately audited revision may be used.** Revision 2 preserves the original request-5 `x20=0` return-value invariant while adding stale-D3LUT invalidation for association/reassociation events 7, 8, 9, and 10.
-11. **Unknown future DHD binaries fail early.** Automatic latest-stable selection does not authorize blind binary patching. If a future stable release changes the DHD instruction signature, CI must stop before the hour-long compile so the patch can be re-audited for that release.
-12. **Build the real target:** `make gt-be19000ai` from `release/src-rt-5.04behnd.4916`. Do not rename the target to work around an error.
-13. **Preserve the real `make` result without immediately killing the job.** Capture the exit status in `MAKE_EXIT_CODE.txt`; the build step itself must allow evidence-salvage steps to run afterward.
-14. **Always salvage evidence before deciding green/red.** On every run, capture `BUILD.log`, a short tail, target-directory listing, all PKGTB outputs, the exact normal firmware if present, SHA-256 data, the prebuilt-DHD patch reports, and final-module inspection data. This salvage step runs with `if: always()`.
-15. **Use the real GT-BE19000AI output directory.** The completed build writes eMMC PKGTB files under `release/src-rt-5.04behnd.4916/targets/96813GW/`, not the generic `image/` directory.
-16. **Derive the expected normal firmware name from the resolved stable release.** Current naming is `GT-BE19000AI_3006_<SERIALNO>_<EXTENDNO>_emmc_squashfs.pkgtb`. Require the exact normal file and never substitute `_loader.pkgtb` for a normal firmware update.
-17. **Verify the final linked DHD module, not just the input object.** After `make`, locate exactly one `targets/96813GW/fs/lib/modules/*/extra/dhd.ko` and run the same ELF/signature verifier against it. This is the proof that the firmware filesystem contains the effective PKTFWD patch.
-18. **The final verifier is the post-build gate.** Require `MAKE_EXIT_CODE=0`, the exact normal firmware, successful SHA-256 round-trip, resolved upstream commit/version, source-reference diff, patched prebuilt DHD report, exactly one final `dhd.ko`, and a successful patched-signature verification of that final module. The accepted binary report must identify **patch revision 2 or later**; revision 1 is never flashable.
-19. **Emit `FLASH_MANIFEST.txt` only after every gate passes.** It must contain both `VERIFIED_FOR_FLASH=YES` and `DHD_BINARY_PATCH_VERIFIED=YES`, plus `PATCH_METHOD=verified-prebuilt-dhd-binary`, resolved release data, firmware hash, and final DHD-module hash. For revision-2 builds, also require `DHD_BINARY_PATCH_REVISION=2`. A green run without those exact manifest claims is not approved for flashing.
-20. **A red run must still produce diagnostics whenever GitHub Actions itself is functioning.** The failure artifact should contain the build exit code and available reports/logs so the next fix is based on the actual failing command.
-21. **Start a fresh workflow run after changing workflow or patch-tool code.** Do not use `Re-run jobs` from an older run because it can execute an older workflow/tool revision.
-22. **Flash only after CI succeeds and the artifact is checked.** Back up router configuration/JFFS first, unzip the GitHub artifact on the Mac, verify both manifest gates plus the binary patch revision, then upload the normal `.pkgtb` through Administration > Firmware Upgrade. Never upload the artifact ZIP itself.
+1. Build firmware in GitHub Actions, not on the router or ASUS AI Board.
+2. Keep JFFS add-ons and compiled firmware changes distinct. A source edit only counts if it reaches a binary that the GT-BE19000AI image actually packages.
+3. Use Merlin's GT-BE19000AI `asuswrt6` lineage and the real target `make gt-be19000ai` from `release/src-rt-5.04behnd.4916`.
+4. Resolve the newest stable compatible release automatically, reject alpha/beta/RC/development versions, and pin the selected immutable upstream commit for the entire run.
+5. Record version, lineage, upstream commit, expected firmware filename, build exit code, source diff, and firmware SHA-256 in the artifact.
+6. Run only the Broadcom/Merlin `make` command as non-root `docker`; retain root for GitHub Actions/container plumbing.
+7. Do not destructively replace the toolchain directory; use the known working `/opt/toolchains` mapping.
+8. GT-BE19000AI DHD is prebuilt. Never treat an edit to `shared/impl1/dhd_pktfwd.c` as proof that `dhd.ko` changed.
+9. Do not rewrite the proprietary DHD prebuilt merely to force the open-source reference change into it when a supported source-built integration point exists.
+10. For the current stale PKTFWD/D3LUT problem, the effective repair point is source-built `shared/impl1/wlshared_linux.c`. It owns the exported `dhd_pktc_del_hook`, while the prebuilt DHD provides the actual D3LUT delete implementation.
+11. The D3LUT repair uses `dhd_pktc_del_hook(mac, NULL)` for DHD bridge FDB add/delete events. `NULL` deliberately invokes the prebuilt DHD's global-pool lookup, avoiding stale device/radio pool selection.
+12. Preserve the real `make` result in `MAKE_EXIT_CODE.txt`, but allow salvage steps to run before the final green/red decision.
+13. Always salvage the build log, log tail, target-directory listing, PKGTB outputs, firmware SHA-256, source diff, and compiled wlshared evidence.
+14. The normal image is under `targets/96813GW/` and ends in `_emmc_squashfs.pkgtb`. `_loader.pkgtb` is not the normal firmware-upgrade image.
+15. A firmware patch must contain a deterministic marker or equivalent proof in the compiled binary that should carry the change. For D3LUT repair v1 the marker is `FCD_DHD_D3LUT_REPAIR_V1` in source-built `wlshared.o`/`wlshared.ko`.
+16. The final gate requires `MAKE_EXIT_CODE=0`, exact firmware presence, SHA-256 round-trip, resolved release identity, expected source diff, built wlshared output, and compiled repair marker.
+17. Emit `FLASH_MANIFEST.txt` only after those gates pass. For the current repair it must include:
+
+```text
+VERIFIED_FOR_FLASH=YES
+FIX=FCD_DHD_D3LUT_REPAIR_V1
+PATCH_PATH=source-built-wlshared
+DHD_PATH=prebuilt-unmodified
+```
+
+18. A failed run should still upload diagnostics whenever Actions itself is functioning.
+19. Start a brand-new workflow run after workflow/patch code changes; do not re-run an old run whose workflow revision is stale.
+20. Before flashing, back up router configuration and JFFS. Flash only the normal `.pkgtb` through the ASUS/Merlin firmware page and do not force a rejected image.
+21. After flashing, validate the original reproduced failure before changing unrelated settings. Keep Runner/WFD/FlowCache enabled unless a temporary diagnostic toggle is specifically required.
+22. Do not add speculative validation gates. A gate must establish model identity, effective patch inclusion, build integrity, or artifact integrity.
 
 ## Automatic release selection
 
-The workflow intentionally has **no version input box**. Each fresh run resolves the newest stable compatible GT-BE19000AI release from Merlin's `asuswrt6` lineage.
+The workflow has no manual version input. A fresh run walks stable release-version commits on `asuswrt6`, newest first, and requires the GT-BE19000AI target plus the exact build-path prerequisites used by the repair.
 
-As of August 23, 2026:
+The established `3006.102.8_4` base is upstream commit:
 
-- `asuswrt6` development head is `3006.102.9 alpha1`, so it is automatically rejected.
-- the newest stable compatible release resolves to `3006.102.8_4`.
-- that release resolves to upstream commit `e6ec7e95706d321c50d1b4b2f912b26323f6163e`.
-- its normal flash image is `GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb`.
+`e6ec7e95706d321c50d1b4b2f912b26323f6163e`
 
-When Merlin publishes a newer stable release that still passes the model/source gates, the resolver may select it automatically. The DHD binary patcher is a separate, stricter compatibility gate: a changed binary signature is rejected before compilation rather than being patched by assumption.
+At the time that base was established, the development branch had already moved beyond it; the stable selector intentionally rejects that development head. Future stable versions may be selected automatically only when their tree still exposes the required model/build integration points.
 
-## Known lessons from the failed CI iterations
+## Lessons that must not regress
 
-- The generic `3006.102.8_4` lineage was wrong for this model and produced `NO THIS TARGET gt-be19000ai`; the target name itself was correct.
-- Running the entire job container as `docker` avoided Broadcom's root check but broke GitHub Actions command-file permissions. The stable split is Actions plumbing as root and only Merlin `make` as `docker`.
-- Run #5 completed the full firmware build and produced both GT-BE19000AI PKGTBs, but the workflow searched the wrong `image/` directory afterward. Packaging failure did not mean the compile failed.
-- Broadcom `buildFS` can print noisy missing-file messages such as `bcm96813/*.bin`, `patch.version`, `rt_tables`, and `targets/fs.bin`. Those exact messages also occurred in run #5 before Merlin successfully produced the final GT-BE19000AI images. Do **not** infer that proprietary blobs must be extracted from stock firmware from those messages alone; judge the build by the actual `make` exit status and final causal error.
-- Run #7 was the first fully green packaging/provenance build, and its firmware SHA-256 and `MAKE_EXIT_CODE=0` were valid. However, artifact audit showed the build log reported `module : 0`, then linked `hnd_dhd/dhd.o` and `dhd.ko` without compiling `dhd_pktfwd.c`. The model's `platform.mak` copies `router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o` into the DHD prebuilt path, and the DHD Makefile uses that whole object when source is unavailable. Therefore run #7 must **not** be flashed as the PKTFWD fix: the source diff alone did not prove the effective binary changed.
-- **Binary patch revision 1 is also permanently rejected.** Audit against the real run-#7 `dhd.ko` showed revision 1 overwrote the original `mov x20,#0` in the request-5 event path. Although its association/reassociation branches reached the intended stale-D3LUT delete block, a non-association path could retain a stale return value. Revision 2 moves the zero-return initialization before event dispatch and preserves the original event-8 station increment, event-12 decrement, and common-return behavior. No revision-1 artifact may be flashed even if other packaging checks are green.
-- The effective fix now targets the actual linked prebuilt DHD object and independently verifies the final installed `dhd.ko`. This binary-level proof is mandatory before flashing.
-- `tests/test-dhd-binary-patch.py` statically verifies the revision-2 instruction map, branch destinations, event semantics, and zero-return invariant without storing any proprietary Broadcom binary in this repository.
-- Do not add speculative validation rules merely because they sound safer. A check is allowed to gate flashing only when it directly establishes model/source/patch/build/artifact integrity.
+- A generic or wrong Merlin lineage can contain a similar version string while lacking the GT-BE19000AI target. Model compatibility is a tree/build property, not just a version label.
+- Broadcom's build rejects running the actual compile as root; Actions still needs root-capable plumbing around it.
+- Successful firmware output can exist even when a later artifact-search step is wrong. Judge the compile by its exit code and causal error, then fix packaging separately.
+- Run #7 proved that a green build plus a visible source diff is insufficient: GT-BE19000AI linked a prebuilt DHD while `dhd_pktfwd.c` was never compiled.
+- The later DHD binary-patcher experiment was removed from the production path. The current design reaches the required semantics through source-built `wlshared` and the DHD-exported delete hook instead of modifying the opaque DHD object.
+- `dhd_pktfwd_lut_del(mac, NULL)` is not an invented behavior: the Broadcom implementation explicitly treats `net_device == NULL` as a global-pool lookup, and stock integration code already uses the delete hook with `NULL` in another path.
+- Bridge FDB lifecycle events are an appropriate repair trigger because `wlshared` already consumes switchdev FDB notifications. The JFFS healer can additionally force a single-client FDB relearn after an MLO lifecycle event when no natural source move occurs.
+- The repair must remain narrow: one client MAC, global D3LUT invalidation for that MAC, then one-client hardware FlowCache invalidation. No automatic global FlowCache flush, Runner cycle, Wi-Fi restart, or deauthentication.
