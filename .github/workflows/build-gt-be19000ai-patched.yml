@@ -1,10 +1,15 @@
-name: Build patched GT-BE19000AI firmware
+name: BUILD THIS - GT-BE19000AI firmware (Runner fix)
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-gt-be19000ai-patched.yml
+      - tools/patch_dhd_pktfwd_prebuilt.py
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   MERLIN_BRANCH: asuswrt6
@@ -29,6 +34,14 @@ jobs:
     steps:
       - name: Checkout patch repo
         uses: actions/checkout@v4
+
+      - name: Keep only main branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          for branch in tmp-mode-fix tmp-mode-fix2; do
+            git push origin --delete "$branch" 2>/dev/null || true
+          done
 
       - name: Prepare clean build volume
         shell: bash
