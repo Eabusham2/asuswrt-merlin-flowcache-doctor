@@ -1,6 +1,6 @@
 #!/bin/sh
 # Automatic per-client Runner hardware-flow repair for Broadcom Wi-Fi 7/MLO lifecycle races.
-# Watches association events plus GT-BE19000AI kernel SBF reinit events and invalidates only the affected client's HW flows.
+# Watches association events plus GT-BE19000AI kernel SBF reinit events and repairs only the affected client.
 
 LIB=${FCD_LIB:-/jffs/scripts/fcd-lib.sh}
 [ -r "$LIB" ] || exit 1
@@ -10,6 +10,7 @@ FCD_MLO_HW_HEAL=${FCD_MLO_HW_HEAL:-1}
 FCD_MLO_HW_SETTLE=${FCD_MLO_HW_SETTLE:-3}
 FCD_MLO_HW_COOLDOWN=${FCD_MLO_HW_COOLDOWN:-60}
 FCD_MLO_KERNEL_EVENTS=${FCD_MLO_KERNEL_EVENTS:-1}
+FCD_MLO_D3LUT_RELEARN=${FCD_MLO_D3LUT_RELEARN:-1}
 EVLOG=${FCD_WIFI_EVENT_LOG:-/jffs/wifi_wlc.log}
 STATE="$FCD_STATE/mlo-hw"
 PIDFILE="$STATE/pid"
@@ -41,6 +42,32 @@ is_mlo_client(){ # mac bss bsslist
     mlo-sticky|mlo-multiradio|mlo-sta-info|mlo-or-eht|mlo-table|mlo-eml-capable) return 0;;
     *) return 1;;
   esac
+}
+
+bridge_d3lut_relearn(){ # mac current_bss
+  _m=$(fcd_norm_mac "$1"); _fallback_bss=$2
+  [ "$FCD_MLO_D3LUT_RELEARN" = "1" ] || return 2
+  command -v bridge >/dev/null 2>&1 || return 2
+
+  # Deleting only this station's dynamic bridge FDB entry is intentionally narrow.
+  # On the patched GT-BE19000AI firmware, wlshared converts the DEL notification into
+  # dhd_pktc_del_hook(mac, NULL), which purges the DHD D3LUT from the global pool.
+  # The station stays associated and its next frame relearns the bridge/D3LUT mapping.
+  _devs=$(bridge fdb show 2>/dev/null | awk -v mac="$_m" '
+    tolower($1) == mac {
+      for (i = 1; i <= NF; i++) if ($i == "dev" && i < NF) print $(i + 1)
+    }' | sort -u)
+  [ -n "$_devs" ] || _devs=$_fallback_bss
+  [ -n "$_devs" ] || return 1
+
+  _ok=1
+  for _d in $_devs; do
+    if bridge fdb del "$_m" dev "$_d" master >/dev/null 2>&1 || \
+       bridge fdb del "$_m" dev "$_d" >/dev/null 2>&1; then
+      _ok=0
+    fi
+  done
+  return "$_ok"
 }
 
 heal_one(){ # mac event_epoch reason
@@ -76,7 +103,7 @@ heal_one(){ # mac event_epoch reason
   _b=$(current_bss "$_m" $_bsslist 2>/dev/null)
 
   # Only positively identified MLO/EHT identities are allowed through this special path.
-  # Unknown/fallback and legacy clients are never hardware-flushed here.
+  # Unknown/fallback and legacy clients are never touched here.
   if ! is_mlo_client "$_m" "$_b" "$_bsslist"; then
     fcd_log MLO-HW-SKIP "mac=$_m reason=not-positive-mlo event=$_reason"
     rmdir "$_lk" 2>/dev/null
@@ -85,19 +112,30 @@ heal_one(){ # mac event_epoch reason
   fi
 
   if [ "$FCD_MLO_HW_HEAL" != "1" ]; then
-    fcd_log MLO-HW-AUDIT "would-flush-hw mac=$_m bss=${_b:-none} event=$_reason"
+    fcd_log MLO-HW-AUDIT "would-relearn-d3lut-and-flush-hw mac=$_m bss=${_b:-none} event=$_reason"
     rmdir "$_lk" 2>/dev/null
     trap - EXIT INT TERM
     return 0
   fi
 
-  # Narrow repair only: invalidate this client's hardware-accelerated flows.
-  # Never globally flush FlowCache and never cycle Runner from this daemon.
+  _d3lut=disabled
+  if [ "$FCD_MLO_D3LUT_RELEARN" = "1" ]; then
+    bridge_d3lut_relearn "$_m" "$_b"
+    _d3rc=$?
+    case "$_d3rc" in
+      0) _d3lut=purged;;
+      2) _d3lut=unavailable;;
+      *) _d3lut=not-found;;
+    esac
+  fi
+
+  # Keep the proven narrow FlowCache hardware invalidation as the second half of repair.
+  # Never globally flush FlowCache, cycle Runner, restart Wi-Fi, or deauthenticate a client.
   if fcctl flush --hw --mac "$_m" >/dev/null 2>&1; then
     printf '%s\n' "$_now" > "$STATE/client/$_k.last"
-    fcd_log MLO-HW-FLUSH "mac=$_m bss=${_b:-none} event=$_reason"
+    fcd_log MLO-HW-FLUSH "mac=$_m bss=${_b:-none} event=$_reason d3lut=$_d3lut"
   else
-    fcd_log ERROR "mlo-hw-flush-failed mac=$_m event=$_reason"
+    fcd_log ERROR "mlo-hw-flush-failed mac=$_m event=$_reason d3lut=$_d3lut"
   fi
 
   rmdir "$_lk" 2>/dev/null
@@ -153,7 +191,7 @@ daemon(){
   if [ "$FCD_MLO_KERNEL_EVENTS" = "1" ] && command -v logread >/dev/null 2>&1; then
     logread -f > "$FIFO" 2>/dev/null & LOGPID=$!
   fi
-  fcd_log START "mlo-runner-heal pid=$$ settle=${FCD_MLO_HW_SETTLE}s cooldown=${FCD_MLO_HW_COOLDOWN}s kernel=${FCD_MLO_KERNEL_EVENTS}"
+  fcd_log START "mlo-runner-heal pid=$$ settle=${FCD_MLO_HW_SETTLE}s cooldown=${FCD_MLO_HW_COOLDOWN}s kernel=${FCD_MLO_KERNEL_EVENTS} d3lut=${FCD_MLO_D3LUT_RELEARN}"
 
   while IFS= read -r _line; do
     handle_line "$_line"
@@ -182,6 +220,7 @@ status(){
     echo "settle: ${FCD_MLO_HW_SETTLE}s"
     echo "cooldown: ${FCD_MLO_HW_COOLDOWN}s"
     echo "kernel-events: ${FCD_MLO_KERNEL_EVENTS}"
+    echo "d3lut-relearn: ${FCD_MLO_D3LUT_RELEARN}"
     echo "mode: $([ "$FCD_MLO_HW_HEAL" = 1 ] && echo automatic || echo audit)"
     return 0
   fi
