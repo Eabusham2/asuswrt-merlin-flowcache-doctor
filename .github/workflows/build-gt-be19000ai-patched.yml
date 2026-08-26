@@ -1,0 +1,226 @@
+name: Build patched GT-BE19000AI firmware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MERLIN_BRANCH: asuswrt6
+  MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
+  EXPECTED_SERIALNO: "102.8"
+  EXPECTED_EXTENDNO: "4"
+  EXPECTED_TARGET_DIR: /project/merlin/release/src-rt-5.04behnd.4916/targets/96813GW
+  EXPECTED_FIRMWARE: GT-BE19000AI_3006_102.8_4_emmc_squashfs.pkgtb
+  DHD_PREBUILT_REL: release/src-rt-5.04behnd.4916/router-sysdep.gt-be19000ai/hnd_extra/prebuilt/dhd.o
+  DHD_EXPECTED_ORIGINAL_SHA256: 51a89c8be5f2f93543d7b0474685c81bd3fcfa48444b47b2e464dd5b3ba2a327
+
+jobs:
+  build:
+    name: GT-BE19000AI patched firmware
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    container:
+      image: gnuton/asuswrt-merlin-toolchains-docker:latest
+      options: --user root
+      volumes:
+        - /mnt:/project
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+
+      - name: Prepare clean build volume
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /project/merlin /project/artifacts /project/build-gt-be19000ai.sh
+          mkdir -p /project/artifacts
+          chown -R docker:docker /home/docker /project
+          df -h / /mnt /project
+
+      - name: Fetch exact GT-BE19000AI Merlin source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project
+          git init merlin
+          cd merlin
+          git remote add origin https://github.com/RMerl/asuswrt-merlin.ng.git
+          git fetch --depth 1 origin "$MERLIN_COMMIT"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$MERLIN_COMMIT"
+          printf '%s\n' "$MERLIN_COMMIT" > /project/artifacts/MERLIN_COMMIT.txt
+          printf '%s\n' "$MERLIN_BRANCH" > /project/artifacts/MERLIN_LINEAGE.txt
+
+      - name: Verify exact GT-BE19000AI baseline and DHD prebuilt
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project/merlin
+          TARGET=release/src-rt-5.04behnd.4916/target.mak
+          CHIP=release/src-rt-5.04behnd.4916/chip_profile.mak
+          MODEL_CFG=release/src-rt-5.04behnd.4916/targets/96813GW/96813GW.GT-BE19000AI
+          VERSION=release/src-rt/version.conf
+          DHD="$DHD_PREBUILT_REL"
+
+          grep -q '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+          grep -q '^GT-BE19000AI_CHIP_PROFILE=6813$' "$CHIP"
+          test -s "$MODEL_CFG"
+          grep -q "^SERIALNO=${EXPECTED_SERIALNO}$" "$VERSION"
+          grep -q "^EXTENDNO=${EXPECTED_EXTENDNO}$" "$VERSION"
+          test -s "$DHD"
+
+          ACTUAL_DHD_SHA="$(sha256sum "$DHD" | awk '{print $1}')"
+          echo "$ACTUAL_DHD_SHA  $DHD" > /project/artifacts/DHD_PREBUILT_ORIGINAL_SHA256.txt
+          test "$ACTUAL_DHD_SHA" = "$DHD_EXPECTED_ORIGINAL_SHA256"
+
+          {
+            echo "lineage=$MERLIN_BRANCH"
+            echo "commit=$MERLIN_COMMIT"
+            grep -E '^(SERIALNO|EXTENDNO)=' "$VERSION"
+            grep '^GT-BE19000AI_CHIP_PROFILE=' "$CHIP"
+            grep '^export GT-BE19000AI[[:space:]]*:=' "$TARGET"
+            echo "dhd_prebuilt=$DHD"
+            echo "dhd_original_sha256=$ACTUAL_DHD_SHA"
+          } > /project/artifacts/BASELINE_VERIFICATION.txt
+
+      - name: Patch the prebuilt DHD object actually consumed by GT-BE19000AI
+        shell: bash
+        run: |
+          set -euo pipefail
+          DHD="/project/merlin/$DHD_PREBUILT_REL"
+          python3 tools/patch_dhd_pktfwd_prebuilt.py patch "$DHD" --report /project/artifacts/DHD_PATCH_REPORT.json
+          python3 tools/patch_dhd_pktfwd_prebuilt.py verify "$DHD" --report /project/artifacts/DHD_VERIFY_REPORT.json
+          sha256sum "$DHD" > /project/artifacts/DHD_PREBUILT_PATCHED_SHA256.txt
+          grep -q '"state_after": "patched"' /project/artifacts/DHD_PATCH_REPORT.json
+          grep -q '"state_after": "patched"' /project/artifacts/DHD_VERIFY_REPORT.json
+          printf '%s\n' "${{ github.sha }}" > /project/artifacts/PATCH_REPO_COMMIT.txt
+
+      - name: Build GT-BE19000AI and preserve exit code
+        shell: bash
+        run: |
+          set -euo pipefail
+          ln -sfn /home/docker/am-toolchains/brcm-arm-hnd /opt/toolchains
+          chown -R docker:docker /project/merlin /project/artifacts /home/docker
+
+          cat > /project/build-gt-be19000ai.sh <<'BUILD'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          test "$(id -u)" -ne 0
+          test "$(whoami)" = docker
+          export LD_LIBRARY="${LD_LIBRARY:-}"
+          source /home/docker/envs/bcm-hnd-ax-4.19be.sh
+          cd /project/merlin/release/src-rt-5.04behnd.4916
+          make gt-be19000ai 2>&1 | tee /project/artifacts/BUILD.log
+          rc=${PIPESTATUS[0]}
+          exit "$rc"
+          BUILD
+
+          chown docker:docker /project/build-gt-be19000ai.sh
+          chmod 0755 /project/build-gt-be19000ai.sh
+
+          set +e
+          sudo -u docker -H /project/build-gt-be19000ai.sh
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > /project/artifacts/MAKE_EXIT_CODE.txt
+          echo "Merlin make exit code: $rc"
+          exit 0
+
+      - name: Verify patched DHD propagated into build tree
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          COPIED=/project/merlin/release/src-rt-5.04behnd.4916/router-sysdep/hnd_dhd/prebuilt/dhd.o
+          if [ -s "$COPIED" ]; then
+            python3 tools/patch_dhd_pktfwd_prebuilt.py verify "$COPIED" --report /project/artifacts/DHD_COPIED_PREBUILT_VERIFY.json
+            sha256sum "$COPIED" > /project/artifacts/DHD_COPIED_PREBUILT_SHA256.txt
+          else
+            echo "missing copied hnd_dhd prebuilt after build" >&2
+            exit 1
+          fi
+
+      - name: Salvage firmware and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          mkdir -p /project/artifacts
+          if [ -d "$EXPECTED_TARGET_DIR" ]; then
+            ls -lah "$EXPECTED_TARGET_DIR" > /project/artifacts/TARGET_DIR_LISTING.txt 2>&1
+            find "$EXPECTED_TARGET_DIR" -maxdepth 1 -type f -name '*.pkgtb' -printf '%f %s bytes\n' | sort > /project/artifacts/PKGTB_OUTPUTS.txt 2>&1
+          else
+            echo "missing: $EXPECTED_TARGET_DIR" > /project/artifacts/TARGET_DIR_LISTING.txt
+            : > /project/artifacts/PKGTB_OUTPUTS.txt
+          fi
+
+          FIRMWARE="$EXPECTED_TARGET_DIR/$EXPECTED_FIRMWARE"
+          if [ -s "$FIRMWARE" ]; then
+            cp -f "$FIRMWARE" /project/artifacts/
+            cd /project/artifacts
+            sha256sum "$EXPECTED_FIRMWARE" > FIRMWARE_SHA256.txt
+            sha256sum -c FIRMWARE_SHA256.txt > FIRMWARE_SHA256_CHECK.txt 2>&1
+            echo "FOUND $FIRMWARE" > FIRMWARE_STATUS.txt
+          else
+            echo "MISSING $FIRMWARE" > /project/artifacts/FIRMWARE_STATUS.txt
+          fi
+
+          if [ -s /project/artifacts/BUILD.log ]; then
+            tail -n 1200 /project/artifacts/BUILD.log > /project/artifacts/BUILD_TAIL.log
+          else
+            echo "BUILD.log not created" > /project/artifacts/BUILD_TAIL.log
+          fi
+          chmod -R a+rX /project/artifacts 2>/dev/null || true
+          exit 0
+
+      - name: Verify successful flash build
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project/artifacts
+          test -s MAKE_EXIT_CODE.txt
+          test "$(cat MAKE_EXIT_CODE.txt)" = "0"
+          test -s "$EXPECTED_FIRMWARE"
+          test -s FIRMWARE_SHA256.txt
+          sha256sum -c FIRMWARE_SHA256.txt
+          test "$(cat MERLIN_COMMIT.txt)" = "$MERLIN_COMMIT"
+          grep -q '^SERIALNO=102.8$' BASELINE_VERIFICATION.txt
+          grep -q '^EXTENDNO=4$' BASELINE_VERIFICATION.txt
+          grep -q '"state_after": "patched"' DHD_VERIFY_REPORT.json
+          grep -q '"state_after": "patched"' DHD_COPIED_PREBUILT_VERIFY.json
+
+          printf '%s\n' "$EXPECTED_FIRMWARE" > FLASH_THIS_FILE.txt
+          {
+            echo "VERIFIED_FOR_FLASH=YES"
+            echo "MODEL=GT-BE19000AI"
+            echo "VERSION=3006.102.8_4"
+            echo "UPSTREAM_COMMIT=$MERLIN_COMMIT"
+            echo "PATCH_REPO_COMMIT=$(cat PATCH_REPO_COMMIT.txt)"
+            echo "PATCH_REVISION=2"
+            echo "PATCH_TARGET=$DHD_PREBUILT_REL"
+            echo "FLASH_FILE=$EXPECTED_FIRMWARE"
+            echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
+          } > FLASH_MANIFEST.txt
+
+      - name: Upload patched firmware
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT-BE19000AI-3006.102.8_4-pktfwd-prebuilt-patched-${{ github.run_number }}
+          path: /project/artifacts
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: GT-BE19000AI-build-failure-${{ github.run_number }}
+          path: /project/artifacts
+          if-no-files-found: warn
+          retention-days: 7
