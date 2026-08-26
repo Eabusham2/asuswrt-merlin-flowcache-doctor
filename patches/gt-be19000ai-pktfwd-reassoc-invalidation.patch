@@ -1,37 +1,59 @@
 From: GT-BE19000AI datapath investigation
-Subject: [PATCH] dhd: invalidate stale PKTFWD D3LUT on assoc/reassoc indications
+Subject: [PATCH] wlshared: globally invalidate DHD D3LUT on bridge station lifecycle
 
-Broadcom's DHD blog connect path handles WLC_E_ASSOC, WLC_E_ASSOC_IND and
-WLC_E_REASSOC_IND (and may receive WLC_E_REASSOC), but dhd_pktfwd_request()
-only invalidates stale D3LUT state for WLC_E_ASSOC.
+GT-BE19000AI links a model-specific prebuilt DHD object, so editing the
+open dhd_pktfwd.c reference source does not reach the shipped DHD module.
+The source-built wlshared layer already owns dhd_pktc_del_hook, and the
+prebuilt DHD registers that hook to dhd_pktfwd_lut_del().
 
-On AP/MLO operation the client-side lifecycle is normally reported as
-ASSOC_IND/REASSOC_IND. If a prior station/link incarnation left a D3LUT
-entry behind, those events can therefore reuse stale PKTFWD radio/flowring
-state. FlowCache/Runner can subsequently learn hardware forwarding from
-that stale mapping.
+The DHD delete implementation explicitly treats net_device == NULL as a
+global D3LUT-pool lookup. Use that supported path for DHD bridge FDB add
+and delete lifecycle events so a stale station MAC is not constrained to
+a possibly stale radio/device pool.
 
-Make the stale-entry invalidation cover all association and reassociation
-request/indication events. dhd_pktfwd_lut_del() is already tolerant of a
-missing entry, so this is idempotent.
+This targets the MLO/reassociation stale-state failure where local Wi-Fi
+remains healthy while routed Runner/FlowCache forwarding collapses. A
+JFFS per-client healer can force a bridge FDB relearn after a positively
+identified MLO lifecycle event, causing this hook to run without
+deauthenticating the station or globally cycling Runner.
 
-NOTE: On GT-BE19000AI current Merlin builds, DHD links a prebuilt whole
-`dhd.o`, so this source patch documents intended semantics but is not by
-itself the effective firmware patch. The GitHub Actions workflow patches
-and verifies the actual prebuilt DHD binary and final dhd.ko.
+The module load string carries FCD_DHD_D3LUT_REPAIR_V1 so the firmware
+build can prove the edited source reached a compiled wlshared binary.
+The proprietary DHD prebuilt is intentionally left unmodified.
 
---- a/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-+++ b/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/dhd_pktfwd.c
-@@ -1109,8 +1109,11 @@ dhd_pktfwd_request(int request, unsigned long param0,
- 	case dhd_pktfwd_req_assoc_sta_e:	/* param0: d3addr, param1: 0|1 assoc */
- 		/* param2: eventtype */
--		if (param2 == WLC_E_ASSOC) {
-+		if ((param2 == WLC_E_ASSOC) ||
-+		    (param2 == WLC_E_ASSOC_IND) ||
-+		    (param2 == WLC_E_REASSOC) ||
-+		    (param2 == WLC_E_REASSOC_IND)) {
- 			/* If a station is roaming, there might be stale entries in d3lut.
- 			 * Look for symbol in global pool and delete if found.
- 			 */
- 			dhd_pktfwd_lut_del((uint8_t *) param0, (struct net_device *)NULL);
- 		}
+--- a/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/wlshared_linux.c
++++ b/release/src-rt-5.04behnd.4916/bcmdrivers/broadcom/net/wl/shared/impl1/wlshared_linux.c
+@@ -89,9 +89,28 @@ static int dhd_swdev_event(struct notifier_block *unused, unsigned long event,
+ 
+ 	/* function is for dhd device */
+ 	/* dhd or eth devices */
+-	if (dhd_pktc_req_hook && (is_netdev_wlan_dhd(dev) || !is_netdev_wlan(dev)))
++	if (dhd_pktc_req_hook && (is_netdev_wlan_dhd(dev) || !is_netdev_wlan(dev))) {
++		/*
++		 * FCD_DHD_D3LUT_REPAIR_V1
++		 *
++		 * GT-BE19000AI uses a prebuilt DHD object. For DHD FDB add/delete,
++		 * purge by MAC through the exported delete hook with net_device ==
++		 * NULL so PKTFWD searches the global pool instead of trusting a
++		 * possibly stale radio/device mapping.
++		 */
++		if (is_netdev_wlan_dhd(dev) && dhd_pktc_del_hook &&
++		    ((event == SWITCHDEV_FDB_ADD_TO_DEVICE) ||
++		     (event == SWITCHDEV_FDB_DEL_TO_DEVICE))) {
++			dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL);
++			return 0;
++		}
++
+ 		dhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT, (unsigned long)(fdb_info->addr),
+ 			(unsigned long)dev, (unsigned long)event);
++	}
+ 
+ 	return 0;
+ }
+@@ -220,7 +239,7 @@ static int __init wlshared_module_init(void)
+ {
+-	printk("Loading wlshared Module...\n");
++	printk("Loading wlshared Module (FCD_DHD_D3LUT_REPAIR_V1)...\n");
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 19, 0))
+ 	/* register swdev event */
