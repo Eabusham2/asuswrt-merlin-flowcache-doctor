@@ -14,6 +14,7 @@ case "$1:$2" in
   get:3:airiq_enable) echo 1;;
   get:airiq_interval_sec) echo 30;;
   set:*) printf '%s\n' "$2" >> "$NV/set.log";;
+  commit:) printf '%s\n' commit >> "$NV/commit.log";;
 esac
 EOS
 cat > "$T/bin/pidof" <<'EOS'
@@ -45,10 +46,12 @@ echo 1000 > "$NV/now"
 "$ROOT/scripts/fcd-airiq-guard.sh" once
 [ "$(cat "$T/state/airiq-on-since")" = 1000 ]
 [ -e "$NV/running" ]
+[ ! -e "$NV/commit.log" ]
 
 echo 1599 > "$NV/now"
 "$ROOT/scripts/fcd-airiq-guard.sh" once
 [ -e "$NV/running" ] || { echo 'FAIL stopped before ten minutes'; exit 1; }
+[ ! -e "$NV/commit.log" ]
 
 echo 1600 > "$NV/now"
 "$ROOT/scripts/fcd-airiq-guard.sh" once
@@ -57,6 +60,8 @@ grep -qx 'airiq_enable=0' "$NV/set.log"
 grep -qx '3:airiq_enable=0' "$NV/set.log"
 grep -qx 'airiq_interval_sec=0' "$NV/set.log"
 [ ! -e "$T/state/airiq-on-since" ]
+[ "$(wc -l < "$NV/commit.log" | tr -d ' ')" -eq 1 ] || { echo 'FAIL timeout did not commit exactly once'; exit 1; }
 grep -q 'AIRIQ-TIMEOUT' "$NV/logger.log"
+grep -q 'AIRIQ-COMMIT' "$NV/logger.log"
 
 echo 'PASS AirIQ ten-minute session cap'

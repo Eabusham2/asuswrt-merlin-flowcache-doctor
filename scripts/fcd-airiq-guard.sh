@@ -153,9 +153,14 @@ enforce_enabled_timeout() {
   _elapsed=$((_now - _since))
   [ "$_elapsed" -lt "$MAX_ON_SECONDS" ] && return 0
 
-  log_msg AIRIQ-TIMEOUT "global=1 elapsed=${_elapsed}s limit=${MAX_ON_SECONDS}s action=force-off commit=no processes=$_details"
+  log_msg AIRIQ-TIMEOUT "global=1 elapsed=${_elapsed}s limit=${MAX_ON_SECONDS}s action=force-off commit=requested processes=$_details"
   nvram set airiq_enable=0
   sync_hidden_off_flags
+  if nvram commit >/dev/null 2>&1; then
+    log_msg AIRIQ-COMMIT "timeout-off persisted=yes"
+  else
+    log_msg AIRIQ-COMMIT-FAIL "timeout-off persisted=no; runtime-off still applied"
+  fi
   stop_airiq
   rm -f "$ON_SINCE"
 }
@@ -247,6 +252,7 @@ case "${1:-daemon}" in
     echo "guard instances: $_gcount"
     echo "global airiq_enable: ${_global:-missing}"
     echo "enabled-session cap: ${MAX_ON_SECONDS}s (elapsed ${_elapsed}s)"
+    echo "timeout persistence: nvram commit once when the enabled-session cap expires"
     echo "indexed flags: $(for _v in '0:airiq_enable' '1:airiq_enable' '2:airiq_enable' '3:airiq_enable'; do _x=$(nvram get "$_v" 2>/dev/null); [ -n "$_x" ] && printf '%s=%s ' "$_v" "$_x"; done)"
     echo "AirIQ processes: $(process_details)"
     exit 0

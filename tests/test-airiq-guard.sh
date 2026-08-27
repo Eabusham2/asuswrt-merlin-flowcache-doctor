@@ -14,6 +14,7 @@ case "$1:$2" in
   get:3:airiq_enable) cat "$NV/hidden" 2>/dev/null;;
   get:airiq_interval_sec) cat "$NV/interval" 2>/dev/null;;
   set:*) printf '%s\n' "$2" >> "$NV/set.log";;
+  commit:) printf '%s\n' commit >> "$NV/commit.log";;
 esac
 EOS
 cat > "$T/bin/pidof" <<'EOS'
@@ -65,6 +66,7 @@ echo 0 > "$NV/global"
 grep -qx '3:airiq_enable=0' "$NV/set.log"
 grep -qx 'airiq_interval_sec=0' "$NV/set.log"
 for N in airiq_monitor airiq_service airiq_app; do grep -qx "$N" "$NV/kill.log"; done
+[ ! -e "$NV/commit.log" ] || { echo 'FAIL ordinary Off enforcement committed NVRAM'; exit 1; }
 
 grep -q "trap 'cleanup; exit 0' INT TERM HUP" "$GUARD" || { echo 'FAIL terminating signal trap missing'; exit 1; }
 echo 'PASS AirIQ guard bidirectional fail-safe behavior'

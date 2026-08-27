@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
-for f in install.sh uninstall.sh scripts/*.sh scripts/roamctl tests/*.sh; do busybox sh -n "$f"; done
+for f in install.sh uninstall.sh install-airiq-guard.sh uninstall-airiq-guard.sh install-wifi-dropwatch.sh scripts/*.sh scripts/roamctl tests/*.sh; do busybox sh -n "$f"; done
 ! grep -R -nE '(^|[[:space:]])eval([[:space:]]|$)' scripts install.sh uninstall.sh
 ! grep -R -nE 'rm -rf /jffs([[:space:]]|$)' scripts install.sh uninstall.sh
 [ "$(grep -R '^[[:space:]]*if fcctl flush --mac' scripts | wc -l)" -eq 1 ]
