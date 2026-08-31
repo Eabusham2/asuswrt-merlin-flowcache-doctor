@@ -5,6 +5,7 @@ REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-do
 DEST=/jffs/scripts
 WATCH=$DEST/fcd-wifi-dropwatch.sh
 HEALTH=$DEST/fcd-suite-health.sh
+CONF=$DEST/flowcache-doctor.conf
 SS=$DEST/services-start
 TMP=/tmp/fcd-wifi-dropwatch.$$
 BACKUP=/jffs/flowcache-doctor/dropwatch-backup-$(date '+%Y%m%d-%H%M%S')
@@ -20,11 +21,18 @@ for F in fcd-wifi-dropwatch.sh fcd-suite-health.sh; do
   sh -n "$TMP/$F" || fail "syntax check failed: $F"
 done
 [ -e "$SS" ] && cp -p "$SS" "$BACKUP/services-start"
+[ -e "$CONF" ] && cp -p "$CONF" "$BACKUP/flowcache-doctor.conf"
 
 [ -x "$WATCH" ] && "$WATCH" stop >/dev/null 2>&1
 cp "$TMP/fcd-wifi-dropwatch.sh" "$WATCH" || fail "dropwatch install failed"
 cp "$TMP/fcd-suite-health.sh" "$HEALTH" || fail "health checker install failed"
 chmod 755 "$WATCH" "$HEALTH" || fail "cannot make scripts executable"
+
+# Existing user policy wins. New/full-suite installs without an explicit Dropwatch
+# retention setting inherit the script's conservative 14-day default.
+if [ -f "$CONF" ] && ! grep -q '^FCD_DROPWATCH_RETENTION_DAYS=' "$CONF" 2>/dev/null; then
+  printf '%s\n' 'FCD_DROPWATCH_RETENTION_DAYS=14' >> "$CONF"
+fi
 
 [ -f "$SS" ] || {
   printf '#!/bin/sh\n' > "$SS" || fail "cannot create services-start"
@@ -67,9 +75,12 @@ else
   printf '%s\n' "Dropwatch standalone health: passed"
 fi
 
+RETENTION=$("$WATCH" status 2>/dev/null | sed -n 's/^retention: //p' | head -n 1)
+[ -n "$RETENTION" ] || RETENTION='14 days'
 rm -rf "$TMP"
 printf '%s\n' "Wi-Fi Dropwatch installed. Backup: $BACKUP"
-printf '%s\n' "Dropwatch captures are retained for 30 days."
+printf '%s\n' "Dropwatch captures are retained for $RETENTION."
+printf '%s\n' "Automatic triggers: high utilization, confirmed dual-public connectivity failure, and new kernel network errors."
 printf '%s\n' "Manual marks always capture, even immediately after an automatic event."
-printf '%s\n' "After SSH returns from a drop: $WATCH mark after-drop"
+printf '%s\n' "After SSH returns from a selective-client drop: $WATCH mark after-drop"
 printf '%s\n' "Then inspect it with: $WATCH latest"
