@@ -4,9 +4,10 @@
 
 set -u
 
-FCD_ROOT=${FCD_ROOT:-/jffs/addons/flowcache-doctor}
+FCD_ROOT=${FCD_ROOT:-/jffs/flowcache-doctor}
 FCD_STATE=${FCD_STATE:-$FCD_ROOT/state}
 FCD_PROBE_IP=${FCD_PROBE_IP:-1.1.1.1}
+FCD_PROBE_IP2=${FCD_DROPWATCH_PROBE_IP2:-9.9.9.9}
 AFFECTED_IP=${1:-}
 AFFECTED_MAC=${2:-}
 CONTROL_IP=${FCD_WIRED_CONTROL_IP:-}
@@ -30,7 +31,7 @@ probe() {
   _label=$1
   _ip=$2
   _result=unsupported
-  if [ -n "$_ip" ] && command -v ping >/dev/null 2>&1; then
+  if [ -n "$_ip" ] && which ping >/dev/null 2>&1; then
     ping -c 3 -W 2 "$_ip" > "$DIR/ping-${_label}.txt" 2>&1 && _result=ok || _result=fail
   fi
   printf '%s\n' "$_result"
@@ -38,6 +39,7 @@ probe() {
 
 PING_WAN=$(probe wan-gateway "$WAN_GW")
 PING_PUBLIC=$(probe public "$FCD_PROBE_IP")
+PING_PUBLIC2=$(probe public2 "$FCD_PROBE_IP2")
 PING_AFFECTED=$(probe affected "$AFFECTED_IP")
 PING_CONTROL=$(probe control "$CONTROL_IP")
 
@@ -51,7 +53,10 @@ PING_CONTROL=$(probe control "$CONTROL_IP")
   echo "control_ip: ${CONTROL_IP:-none}"
   echo "wan_gateway: ${WAN_GW:-unknown}"
   echo "wan_gateway_ping: $PING_WAN"
+  echo "public_ip: $FCD_PROBE_IP"
   echo "public_ip_ping: $PING_PUBLIC"
+  echo "public_ip2: $FCD_PROBE_IP2"
+  echo "public_ip2_ping: $PING_PUBLIC2"
   echo "router_to_affected_ping: $PING_AFFECTED"
   echo "router_to_control_ping: $PING_CONTROL"
   echo "note: router-to-client ICMP failure is not proof of LAN loss because a client firewall may block ICMP"
@@ -94,7 +99,7 @@ PING_CONTROL=$(probe control "$CONTROL_IP")
   echo
 
   echo "=== BROADCOM PHY MAP ==="
-  if command -v ethctl >/dev/null 2>&1; then
+  if which ethctl >/dev/null 2>&1; then
     ethctl phy-map 2>&1
   else
     echo "ethctl unavailable"
@@ -102,7 +107,7 @@ PING_CONTROL=$(probe control "$CONTROL_IP")
   echo
 
   echo "=== FLOW CACHE STATUS ==="
-  if command -v fcctl >/dev/null 2>&1; then
+  if which fcctl >/dev/null 2>&1; then
     fcctl status 2>&1
   else
     echo "fcctl unavailable"
@@ -118,7 +123,7 @@ PING_CONTROL=$(probe control "$CONTROL_IP")
   echo
 
   echo "=== BLOG STATS ==="
-  if command -v blogctl >/dev/null 2>&1; then
+  if which blogctl >/dev/null 2>&1; then
     blogctl stats 2>&1
   else
     echo "blogctl unavailable"
