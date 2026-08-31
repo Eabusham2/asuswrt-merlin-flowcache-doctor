@@ -1,6 +1,7 @@
 #!/bin/sh
 # Passive start/stop flight recorder for transient GT-BE19000AI MLO range faults.
-# Usage: fcd-range-flight.sh start <MLD> [interval_s] | stop | status | latest
+# Usage: fcd-range-flight.sh start [auto|MLD] [interval_s] | stop | status | latest
+# Default target is auto: record every associated station/link and flowring destination.
 # Writes only to /tmp. No steering, deauth, queue changes, flushes, or restarts.
 
 set -u
@@ -17,50 +18,71 @@ alive() {
     [ -n "${1:-}" ] && [ -d "/proc/$1" ]
 }
 
-find_mld_sta() {
+sta_lines() {
     _if=$1
-    _mld=$2
-    for _mac in $(wl -i "$_if" assoclist 2>/dev/null | awk '{print $2}'); do
-        _s=$(wl -i "$_if" sta_info "$_mac" 2>/dev/null)
-        printf '%s\n' "$_s" | grep -qi "$_mld" || continue
-        printf '%s\n' "$_mac"
-        return 0
-    done
-    return 1
-}
-
-sta_snapshot() {
-    _if=$1
-    _mld=$2
-    _mac=$(find_mld_sta "$_if" "$_mld" 2>/dev/null || true)
-    if [ -z "$_mac" ]; then
-        echo "--- $_if MLD NOT PRESENT ---"
-        return 0
-    fi
+    _mac=$2
     echo "--- $_if $_mac ---"
     wl -i "$_if" sta_info "$_mac" 2>/dev/null |
         grep -E 'STA |aid:|chanspec|idle |state:|connection:|MLO: peer|link_id|rate of last tx|rate of last rx|per antenna rssi of last|per antenna average|smoothed rssi|tx pkts retries|tx pkts retry exhausted|rx total pkts retried|tx nrate|rx nrate|link bandwidth|Max Rate'
 }
 
-sample() {
+all_sta_snapshot() {
+    for _if in wl2.1 wl1.1 wl0.1; do
+        _seen=0
+        for _mac in $(wl -i "$_if" assoclist 2>/dev/null | awk '{print $2}'); do
+            [ -n "$_mac" ] || continue
+            _seen=1
+            sta_lines "$_if" "$_mac"
+        done
+        [ "$_seen" -eq 1 ] || echo "--- $_if NO ASSOCIATED STATIONS ---"
+    done
+}
+
+target_snapshot() {
     _mld=$1
+    [ "$_mld" != auto ] || return 0
+    echo "--- TARGET MLD MATCHES ---"
+    _found=0
+    for _if in wl2.1 wl1.1 wl0.1; do
+        for _mac in $(wl -i "$_if" assoclist 2>/dev/null | awk '{print $2}'); do
+            _s=$(wl -i "$_if" sta_info "$_mac" 2>/dev/null)
+            printf '%s\n' "$_s" | grep -qi "$_mld" || continue
+            echo "target_mld=$_mld link_if=$_if link_mac=$_mac"
+            _found=1
+        done
+    done
+    [ "$_found" -eq 1 ] || echo "target_mld=$_mld NOT PRESENT"
+}
+
+sample() {
+    _target=$1
     _n=$2
     echo
     echo "========== SAMPLE $_n $(date '+%Y-%m-%d %H:%M:%S %z') =========="
 
     echo "--- MLO INFO ---"
-    wl -i wl2.1 mlo info 2>/dev/null |
-        grep -E 'MLO_ACTIVE|MLD1::|link0:|link1:|link2:|MLO SCB:|active_link_map|assoc_link_bmp|Tid Map|Client Mode' |
-        grep -Ei "MLO_ACTIVE|MLD1::|link0:|link1:|link2:|${_mld}|Tid Map|Client Mode"
+    for _if in wl2.1 wl1.1 wl0.1; do
+        echo "[$_if]"
+        wl -i "$_if" mlo info 2>/dev/null |
+            grep -E 'MLO_ACTIVE|MLD1::|link0:|link1:|link2:|MLO SCB:|active_link_map|assoc_link_bmp|Tid Map|Client Mode'
+    done
 
-    echo "--- MLO COUNTERS ---"
-    wl -i wl2.1 mlo scb_stats "$_mld" 2>/dev/null |
-        grep -E 'STA |link_id|tx_pkts_acked|phy_tx_errors|tx_pkts_total|rx_pkts'
+    echo "--- MLO STATUS ---"
+    for _if in wl2.1 wl1.1 wl0.1; do
+        echo "[$_if]"
+        wl -i "$_if" mlo_status 2>/dev/null |
+            grep -E 'MLD|SCB|link|active|assoc|Tid|Client|MAC' | head -n 80
+    done
 
-    echo "--- CLIENT LINKS ---"
-    sta_snapshot wl2.1 "$_mld"
-    sta_snapshot wl1.1 "$_mld"
-    sta_snapshot wl0.1 "$_mld"
+    if [ "$_target" != auto ]; then
+        echo "--- TARGET MLO COUNTERS ---"
+        wl -i wl2.1 mlo scb_stats "$_target" 2>/dev/null |
+            grep -E 'STA |link_id|tx_pkts_acked|phy_tx_errors|tx_pkts_total|rx_pkts'
+    fi
+
+    echo "--- ALL CLIENT LINKS ---"
+    all_sta_snapshot
+    target_snapshot "$_target"
 
     echo "--- BE FLOWRINGS ---"
     for _r in 1 2; do
@@ -88,7 +110,7 @@ sample() {
 }
 
 run_daemon() {
-    _mld=$1
+    _target=$1
     _interval=$2
     _log=$3
     echo $$ > "$PIDFILE"
@@ -96,7 +118,7 @@ run_daemon() {
     {
         echo "Flowcache Doctor range flight recorder"
         echo "started: $(date '+%Y-%m-%d %H:%M:%S %z')"
-        echo "mld: $_mld"
+        echo "target: $_target"
         echo "interval_s: $_interval"
         echo "note: passive/read-only; output is /tmp only"
     } > "$META"
@@ -109,16 +131,18 @@ run_daemon() {
     _n=0
     while :; do
         _n=$((_n + 1))
-        sample "$_mld" "$_n" >> "$_log" 2>&1
+        sample "$_target" "$_n" >> "$_log" 2>&1
         sleep "$_interval"
     done
 }
 
 case "${1:-}" in
     start)
-        MLD=${2:-}
+        TARGET=${2:-auto}
         INTERVAL=${3:-2}
-        valid_mld "$MLD" || { echo "usage: $0 start <MLD> [interval_s]" >&2; exit 1; }
+        if [ "$TARGET" != auto ]; then
+            valid_mld "$TARGET" || { echo "usage: $0 start [auto|MLD] [interval_s]" >&2; exit 1; }
+        fi
         case "$INTERVAL" in ''|*[!0-9]*) INTERVAL=2;; esac
         [ "$INTERVAL" -ge 1 ] || INTERVAL=1
         [ "$INTERVAL" -le 10 ] || INTERVAL=10
@@ -129,11 +153,11 @@ case "${1:-}" in
         fi
         STAMP=$(date '+%Y%m%d-%H%M%S')
         LOG="/tmp/fcd-range-flight-$STAMP.log"
-        "$0" daemon "$MLD" "$INTERVAL" "$LOG" >/dev/null 2>&1 &
+        "$0" daemon "$TARGET" "$INTERVAL" "$LOG" >/dev/null 2>&1 &
         sleep 1
         P=$(cat "$PIDFILE" 2>/dev/null || true)
         alive "$P" || { echo "failed to start" >&2; exit 1; }
-        echo "started pid=$P log=$LOG"
+        echo "started pid=$P target=$TARGET log=$LOG"
         ;;
     stop)
         P=$(cat "$PIDFILE" 2>/dev/null || true)
@@ -164,7 +188,7 @@ case "${1:-}" in
         run_daemon "$1" "$2" "$3"
         ;;
     *)
-        echo "usage: $0 start <MLD> [interval_s] | stop | status | latest"
+        echo "usage: $0 start [auto|MLD] [interval_s] | stop | status | latest"
         exit 1
         ;;
 esac
