@@ -2,6 +2,8 @@
 set -u
 
 SS=/jffs/scripts/services-start
+CONF=/jffs/scripts/flowcache-doctor.conf
+CLEANUP=/jffs/scripts/flowcache-doctor-cleanup.sh
 RC=0
 ok(){ echo "  ok: $*"; }
 bad(){ echo "  FAIL: $*"; RC=1; }
@@ -47,7 +49,23 @@ fi
 
 [ -d /jffs/flowcache-doctor/log ] && ok "event log directory present" || warn "event log directory absent until first log"
 [ -d /jffs/flowcache-doctor/dropwatch ] && ok "dropwatch capture directory present" || warn "dropwatch capture directory absent until first start"
-echo "  retention: Flowcache logs 30 days; Dropwatch captures 30 days"
+
+DROP_RET=14
+if [ -f "$CONF" ]; then
+  _dr=$(sed -n 's/^FCD_DROPWATCH_RETENTION_DAYS=//p' "$CONF" | tail -n 1)
+  case "$_dr" in ''|*[!0-9]*) :;; *) DROP_RET=$_dr;; esac
+fi
+
+FLOW_RET=30
+if [ -f "$CLEANUP" ]; then
+  _fr=$(sed -n 's/^DAYS=//p' "$CLEANUP" | head -n 1)
+  case "$_fr" in ''|*[!0-9]*) :;; *) FLOW_RET=$_fr;; esac
+elif [ -f "$CONF" ]; then
+  _fr=$(sed -n 's/^FCD_LOG_RETENTION_DAYS=//p' "$CONF" | tail -n 1)
+  case "$_fr" in ''|*[!0-9]*) :;; *) FLOW_RET=$_fr;; esac
+fi
+
+echo "  retention: Flowcache logs ${FLOW_RET} days; Dropwatch captures ${DROP_RET} days"
 
 [ "$RC" -eq 0 ] && echo healthy || echo "problems found"
 exit "$RC"
