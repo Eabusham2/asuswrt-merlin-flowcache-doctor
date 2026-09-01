@@ -54,11 +54,37 @@ target_snapshot() {
     [ "$_found" -eq 1 ] || echo "target_mld=$_mld NOT PRESENT"
 }
 
+partner_chspec() {
+    _view=$1
+    _link=$2
+    wl -i "$_view" mlo info 2>/dev/null |
+        awk -v L="$_link:" '$1==L {x=$0; sub(/^.*chanspec /,"",x); print x; exit}'
+}
+
 sample() {
     _target=$1
     _n=$2
     echo
     echo "========== SAMPLE $_n $(date '+%Y-%m-%d %H:%M:%S %z') =========="
+
+    echo "--- MLO CHANNEL CONSISTENCY ---"
+    _d5=$(wl -i wl1 chanspec 2>/dev/null)
+    _d6=$(wl -i wl2 chanspec 2>/dev/null)
+    _5v6=$(partner_chspec wl2.1 link1)
+    _5v5=$(partner_chspec wl1.1 link1)
+    _6v6=$(partner_chspec wl2.1 link0)
+    _6v5=$(partner_chspec wl1.1 link0)
+    echo "direct5=${_d5:-?} view5-from6=${_5v6:-?} view5-from5=${_5v5:-?}"
+    echo "direct6=${_d6:-?} view6-from6=${_6v6:-?} view6-from5=${_6v5:-?}"
+    [ -n "$_d5" ] && [ -n "$_5v6" ] && [ "$_d5" != "$_5v6" ] && echo "MLO_CHSPEC_MISMATCH: 5GHz direct != wl2.1 partner view"
+    [ -n "$_d6" ] && [ -n "$_6v5" ] && [ "$_d6" != "$_6v5" ] && echo "MLO_CHSPEC_MISMATCH: 6GHz direct != wl1.1 partner view"
+
+    echo "--- INTERFERENCE / RX NOISE ---"
+    for _if in wl1 wl2; do
+        _ov=$(wl -i "$_if" interference_override 2>/dev/null | sed -n 's/^Mode = \(-\{0,1\}[0-9][0-9]*\).*/\1/p' | head -n1)
+        _iq=$(wl -i "$_if" phy_rxiqest 2>/dev/null)
+        echo "$_if override=${_ov:-?} rxiq=${_iq:-?}"
+    done
 
     echo "--- MLO INFO ---"
     for _if in wl2.1 wl1.1 wl0.1; do
