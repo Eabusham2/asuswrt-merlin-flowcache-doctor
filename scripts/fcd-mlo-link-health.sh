@@ -2,12 +2,32 @@
 # Read-only per-link health inspector for one MLD on GT-BE19000AI.
 # Finds the current randomized link MAC on each MLO BSS by matching the MLD
 # inside sta_info, then prints only link/RF/retry fields needed for range work.
+# Usage: fcd-mlo-link-health.sh [auto|MLD]
+# `auto` selects the sole MLD currently listed by wl2.1 (6 GHz).
 
 set -u
-MLD=${1:-}
+MLD=${1:-auto}
+
+if [ "$MLD" = auto ]; then
+  MLDS=$(wl -i wl2.1 mlo info 2>/dev/null |
+    sed -n 's/.*\/MLD-\(([0-9A-Fa-f:]*)\).*/\1/p' 2>/dev/null)
+  # BusyBox sed does not support every extended form; use awk fallback.
+  [ -n "$MLDS" ] || MLDS=$(wl -i wl2.1 mlo info 2>/dev/null |
+    awk '/MLO SCB:/ && /\/MLD-/ {x=$0; sub(/^.*\/MLD-/,"",x); sub(/[[:space:]].*$/,"",x); print x}' |
+    sort -u)
+  COUNT=$(printf '%s\n' "$MLDS" | awk 'NF{n++} END{print n+0}')
+  [ "$COUNT" -eq 1 ] || {
+    echo "ERROR: auto expected exactly one 6-GHz MLD, found $COUNT" >&2
+    printf '%s\n' "$MLDS" >&2
+    echo "usage: $0 [auto|MLD]" >&2
+    exit 1
+  }
+  MLD=$(printf '%s\n' "$MLDS" | awk 'NF{print; exit}')
+fi
+
 case "$MLD" in
-  '') echo "usage: $0 MLD" >&2; exit 1;;
-  *[!0-9A-Fa-f:]*) echo "invalid MLD" >&2; exit 1;;
+  '') echo "usage: $0 [auto|MLD]" >&2; exit 1;;
+  *[!0-9A-Fa-f:]*) echo "invalid MLD: $MLD" >&2; exit 1;;
 esac
 
 norm(){ printf '%s\n' "$1" | tr 'A-F' 'a-f'; }
@@ -35,8 +55,7 @@ for IF in wl2.1 wl1.1 wl0.1; do
   done
   [ "$MATCH" -eq 1 ] || echo "MLD not present on this BSS"
   echo
-
-done
+ done
 
 echo "================ MLO COUNTERS ================"
 wl -i wl2.1 mlo scb_stats "$MLD" 2>/dev/null |
