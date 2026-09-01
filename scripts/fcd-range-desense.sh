@@ -9,6 +9,7 @@
 #   8  preemption
 #   64 OBSS detection/mitigation
 # `nodesense` uses 74, preserving everything except bit 1.
+# `clean` uses 72 = 8+64, preserving preemption + OBSS only.
 
 set -u
 STATE=/tmp/fcd-range-desense.state
@@ -89,6 +90,7 @@ case "${1:-status}" in
     status) show ;;
     test|off) apply_mode 0 "ALL MITIGATION OFF" ;;
     nodesense) apply_mode 74 "DESENSE OFF; HW-ACI/PREEMPTION/OBSS KEPT" ;;
+    clean|lean|range) apply_mode 72 "CLEAN-HOUSE: PREEMPTION/OBSS ONLY" ;;
     restore) restore ;;
-    *) echo "usage: $0 status|test|nodesense|restore" >&2; exit 1 ;;
+    *) echo "usage: $0 status|test|nodesense|clean|restore" >&2; exit 1 ;;
 esac
