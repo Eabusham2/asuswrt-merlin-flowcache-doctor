@@ -1,8 +1,14 @@
 #!/bin/sh
 # Reversible GT-BE19000AI range A/B for Broadcom ACPHY interference mitigation.
-# The current mode can enable glitch-based RX desense / packet-gain limiting.
-# This script changes only the runtime interference_override on wl1/wl2.
+# Changes only runtime interference_override on wl1/wl2.
 # No channel change, radio restart, MLO change, FlowCache flush, or persistence.
+#
+# Current production mode observed on this router: 75 = 1+2+8+64
+#   1  glitch-based receiver desense
+#   2  HW-ACI packet-gain limiting
+#   8  preemption
+#   64 OBSS detection/mitigation
+# `nodesense` uses 74, preserving everything except bit 1.
 
 set -u
 STATE=/tmp/fcd-range-desense.state
@@ -25,35 +31,41 @@ show()
     done
 }
 
-save()
+save_once()
 {
-    : > "$STATE" || exit 1
+    # Never overwrite the original pre-test state while switching profiles.
+    [ -s "$STATE" ] && return 0
+    TMP="$STATE.$$"
+    : > "$TMP" || exit 1
     for IF in $RADIOS; do
         V="$(get_override "$IF")"
-        case "$V" in ''|*[!0-9-]*) rm -f "$STATE"; echo "ERROR: cannot read $IF override" >&2; exit 1;; esac
-        printf '%s %s\n' "$IF" "$V" >> "$STATE"
+        case "$V" in ''|*[!0-9-]*) rm -f "$TMP"; echo "ERROR: cannot read $IF override" >&2; exit 1;; esac
+        printf '%s %s\n' "$IF" "$V" >> "$TMP"
     done
+    mv "$TMP" "$STATE"
 }
 
-apply_zero()
+apply_mode()
 {
-    save
+    MODE="$1"
+    LABEL="$2"
+    save_once
     for IF in $RADIOS; do
-        wl -i "$IF" interference_override 0 >/dev/null 2>&1 || {
-            echo "ERROR: $IF rejected override 0; restoring" >&2
+        wl -i "$IF" interference_override "$MODE" >/dev/null 2>&1 || {
+            echo "ERROR: $IF rejected override $MODE; restoring original state" >&2
             "$0" restore >/dev/null 2>&1 || true
             exit 1
         }
     done
     for IF in $RADIOS; do
         V="$(get_override "$IF")"
-        [ "$V" = 0 ] || {
-            echo "ERROR: verification failed on $IF; restoring" >&2
+        [ "$V" = "$MODE" ] || {
+            echo "ERROR: verification failed on $IF; restoring original state" >&2
             "$0" restore >/dev/null 2>&1 || true
             exit 1
         }
     done
-    echo "APPLIED: interference mitigation override=0 on wl1/wl2"
+    echo "APPLIED: $LABEL (interference_override=$MODE) on wl1/wl2"
     echo "Runtime only; no restart and no persistent setting was written."
     show
 }
@@ -75,7 +87,8 @@ restore()
 
 case "${1:-status}" in
     status) show ;;
-    test|off) apply_zero ;;
+    test|off) apply_mode 0 "ALL MITIGATION OFF" ;;
+    nodesense) apply_mode 74 "DESENSE OFF; HW-ACI/PREEMPTION/OBSS KEPT" ;;
     restore) restore ;;
-    *) echo "usage: $0 status|test|restore" >&2; exit 1 ;;
+    *) echo "usage: $0 status|test|nodesense|restore" >&2; exit 1 ;;
 esac
