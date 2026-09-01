@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.5-d3lut-relearn
+VERSION=1.0.6-range-desense
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -9,7 +9,7 @@ PROFILE=/jffs/configs/profile.add
 TMP=/tmp/flowcache-doctor-install.$$
 BACKUP=$ROOT/backup-$(date '+%Y%m%d-%H%M%S')
 STAGE=0
-FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh roamctl"
+FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh roamctl"
 
 rollback(){
   [ "$STAGE" = "1" ] || return 0
@@ -19,10 +19,10 @@ rollback(){
   cru d flowcache-doctor-watchdog 2>/dev/null
   cru d flowcache-doctor-mlo-hw-watchdog 2>/dev/null
   rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
-    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
+    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/fcd-range-desense.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
     "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
   for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh flowcache-doctor.conf \
+    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh flowcache-doctor.conf \
     flowcache-doctor-uninstall.sh; do
     [ -e "$BACKUP/$f" ] && cp -p "$BACKUP/$f" "$DEST/$f"
   done
@@ -44,7 +44,7 @@ mkdir -p "$TMP" "$DEST" "$ROOT" "$BACKUP" /jffs/configs
 [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && "$DEST/fcd-mlo-runner-heal.sh" stop >/dev/null 2>&1
 [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
 for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh flowcache-doctor.conf \
+  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh flowcache-doctor.conf \
   flowcache-doctor-uninstall.sh; do
   [ -e "$DEST/$f" ] && cp -p "$DEST/$f" "$BACKUP/$f"
 done
@@ -76,7 +76,7 @@ FCD_MIN_GAP=8
 FCD_COOLDOWN=60
 FCD_PENDING_TTL=60
 FCD_SETTLE_FLUSHES="20 60 300"
-FCD_LOG_RETENTION_DAYS=30
+FCD_LOG_RETENTION_DAYS=14
 FCD_STEER_MODE=advisor
 FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
@@ -91,15 +91,17 @@ FCD_MLO_HW_SETTLE=3
 FCD_MLO_HW_COOLDOWN=60
 FCD_MLO_KERNEL_EVENTS=1
 
-# Passive congestion correlation. It never steers, restarts, changes channels, or flushes a radio.
+# Passive congestion correlation. Lightweight UTIL logs stay enabled, but full
+# utilization-triggered incident snapshots default off because connectivity
+# Dropwatch already captures real outages. Manual `roamctl capture` still works.
 FCD_UTIL_HIGH=85
 FCD_UTIL_RECOVER=65
 FCD_UTIL_SPIKE_DELTA=20
 FCD_UTIL_LOG_COOLDOWN=60
-FCD_INCIDENT_CAPTURE=1
+FCD_INCIDENT_CAPTURE=0
 FCD_INCIDENT_SAMPLES=6
 FCD_INCIDENT_SAMPLE_INTERVAL=2
-FCD_INCIDENT_COOLDOWN=120
+FCD_INCIDENT_COOLDOWN=900
 FCD_PROBE_IP=1.1.1.1
 EOFCONF
 sh -n "$TMP/flowcache-doctor.conf" || fail "default config invalid"
@@ -145,6 +147,7 @@ if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
 fi
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
 [ -x "$DEST/fcd-incident.sh" ] || fail "incident capture missing after install"
+[ -x "$DEST/fcd-range-desense.sh" ] || fail "range desense guard missing after install"
 STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
@@ -154,4 +157,5 @@ if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
 else
   echo "MLO Runner + D3LUT stale-state healer: armed; waiting for event source"
 fi
+echo "Automatic utilization incident snapshots: disabled (lightweight UTIL logging remains active)"
 echo "Run: /jffs/scripts/roamctl clients"
