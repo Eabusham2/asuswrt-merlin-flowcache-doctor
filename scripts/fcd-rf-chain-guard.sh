@@ -10,15 +10,22 @@ set -u
 EXPECTED=0xf
 RADIOS="wl1 wl2"
 
+normalize_mask() {
+    # Broadcom wl on this platform may print masks as "(0xf)".
+    printf '%s\n' "$1" | tr -d '()[:space:]'
+}
+
 mask_ok() {
-    case "$1" in
+    _m=$(normalize_mask "$1")
+    case "$_m" in
         15|0xf|0Xf|0x0f|0X0F) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 mask_known() {
-    case "$1" in
+    _m=$(normalize_mask "$1")
+    case "$_m" in
         0|1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|0x[0-9A-Fa-f]*|0X[0-9A-Fa-f]*) return 0 ;;
         *) return 1 ;;
     esac
@@ -28,11 +35,9 @@ read_mask() {
     _if=$1
     _cmd=$2
     _out=$(wl -i "$_if" "$_cmd" 2>/dev/null | tail -n 1 | tr -d '\r')
-    # Broadcom wl commonly returns just the value. If it returns a label,
-    # take the last token, but fail closed if it is not numeric/hex.
     set -- $_out
     eval _v=\${$#:-}
-    printf '%s\n' "${_v:-unknown}"
+    normalize_mask "${_v:-unknown}"
 }
 
 show_power() {
