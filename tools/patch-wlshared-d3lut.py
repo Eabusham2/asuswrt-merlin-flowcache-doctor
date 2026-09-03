@@ -17,12 +17,15 @@ STOCK = """\t/* function is for dhd device */
 PATCHED = """\t/* function is for dhd device */
 \t/* dhd or eth devices */
 \tif (dhd_pktc_req_hook && (is_netdev_wlan_dhd(dev) || !is_netdev_wlan(dev))) {
-\t\t/* FCD_DHD_D3LUT_REPAIR_V1: purge stale radio-pool ownership globally. */
+\t\t/*
+\t\t * FCD_DHD_D3LUT_REPAIR_V1
+\t\t * Purge stale radio-pool ownership globally, then preserve the
+\t\t * original Broadcom PKTC_TBL_BRIDGE_EVENT bookkeeping below.
+\t\t */
 \t\tif (is_netdev_wlan_dhd(dev) && dhd_pktc_del_hook &&
 \t\t    ((event == SWITCHDEV_FDB_ADD_TO_DEVICE) ||
 \t\t     (event == SWITCHDEV_FDB_DEL_TO_DEVICE))) {
 \t\t\tdhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL);
-\t\t\treturn 0;
 \t\t}
 
 \t\tdhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT, (unsigned long)(fdb_info->addr),
@@ -52,10 +55,16 @@ def patch(path: Path) -> None:
         "dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL)",
         "SWITCHDEV_FDB_ADD_TO_DEVICE",
         "SWITCHDEV_FDB_DEL_TO_DEVICE",
+        "dhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT",
     )
     for token in required:
         if token not in check:
             raise SystemExit(f"post-patch verification failed: {token}")
+
+    # The repair must not short-circuit Broadcom's original bridge-event path.
+    repaired_block = check[check.index(MARKER):check.index(MARKER) + 1200]
+    if "return 0;" in repaired_block:
+        raise SystemExit("post-patch verification failed: early return still suppresses bridge bookkeeping")
 
 
 if __name__ == "__main__":
