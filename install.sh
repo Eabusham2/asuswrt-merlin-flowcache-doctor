@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.6-range-desense
+VERSION=1.0.7-low-latency
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -9,7 +9,7 @@ PROFILE=/jffs/configs/profile.add
 TMP=/tmp/flowcache-doctor-install.$$
 BACKUP=$ROOT/backup-$(date '+%Y%m%d-%H%M%S')
 STAGE=0
-FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh roamctl"
+FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh roamctl"
 
 rollback(){
   [ "$STAGE" = "1" ] || return 0
@@ -19,10 +19,10 @@ rollback(){
   cru d flowcache-doctor-watchdog 2>/dev/null
   cru d flowcache-doctor-mlo-hw-watchdog 2>/dev/null
   rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
-    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/fcd-range-desense.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
+    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/fcd-range-desense.sh" "$DEST/dhd-no-coalesce.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
     "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
   for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh flowcache-doctor.conf \
+    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh flowcache-doctor.conf \
     flowcache-doctor-uninstall.sh; do
     [ -e "$BACKUP/$f" ] && cp -p "$BACKUP/$f" "$DEST/$f"
   done
@@ -44,7 +44,7 @@ mkdir -p "$TMP" "$DEST" "$ROOT" "$BACKUP" /jffs/configs
 [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && "$DEST/fcd-mlo-runner-heal.sh" stop >/dev/null 2>&1
 [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
 for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh flowcache-doctor.conf \
+  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh flowcache-doctor.conf \
   flowcache-doctor-uninstall.sh; do
   [ -e "$DEST/$f" ] && cp -p "$DEST/$f" "$BACKUP/$f"
 done
@@ -124,8 +124,9 @@ rm -rf /tmp/roam-detect
 cru d roam-detect-wd 2>/dev/null
 
 [ -f "$SS" ] || { printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; }
-sed -i '/roamctl boot/d; /roam-detect-wd/d; /flowcache-doctor-watchdog/d; /fcd-mlo-runner-heal.sh start/d; /flowcache-doctor-mlo-hw-watchdog/d' "$SS"
+sed -i '/roamctl boot/d; /roam-detect-wd/d; /flowcache-doctor-watchdog/d; /fcd-mlo-runner-heal.sh start/d; /flowcache-doctor-mlo-hw-watchdog/d; /dhd-no-coalesce.sh/d' "$SS"
 printf '%s\n' "$DEST/roamctl boot" >> "$SS"
+printf '%s\n' "$DEST/dhd-no-coalesce.sh '&'" >> "$SS"
 printf '%s\n' "$DEST/fcd-mlo-runner-heal.sh start" >> "$SS"
 printf '%s\n' 'cru a flowcache-doctor-watchdog "* * * * * /jffs/scripts/roamctl watchdog"' >> "$SS"
 printf '%s\n' 'cru a flowcache-doctor-mlo-hw-watchdog "* * * * * /jffs/scripts/fcd-mlo-runner-heal.sh watchdog"' >> "$SS"
@@ -139,6 +140,7 @@ printf '%s\n' "alias roamctl='$DEST/roamctl' # flowcache-doctor" >> "$PROFILE"
 rm -f "$DEST/flowcache-doctor.disabled"
 rm -rf /tmp/flowcache-doctor
 "$DEST/roamctl" start
+"$DEST/dhd-no-coalesce.sh" &
 "$DEST/fcd-mlo-runner-heal.sh" start
 sleep 3
 "$DEST/roamctl" health || fail "installed files failed health check; previous version restored; backup is at $BACKUP"
@@ -148,6 +150,7 @@ fi
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
 [ -x "$DEST/fcd-incident.sh" ] || fail "incident capture missing after install"
 [ -x "$DEST/fcd-range-desense.sh" ] || fail "range desense guard missing after install"
+[ -x "$DEST/dhd-no-coalesce.sh" ] || fail "DHD low-latency coalescing keeper missing after install"
 STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
@@ -157,5 +160,6 @@ if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
 else
   echo "MLO Runner + D3LUT stale-state healer: armed; waiting for event source"
 fi
+echo "DHD interrupt coalescing: disabled (amount=0) with LBR keepers preserved"
 echo "Automatic utilization incident snapshots: disabled (lightweight UTIL logging remains active)"
 echo "Run: /jffs/scripts/roamctl clients"
