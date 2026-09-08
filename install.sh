@@ -126,7 +126,7 @@ cru d roam-detect-wd 2>/dev/null
 [ -f "$SS" ] || { printf '#!/bin/sh\n' > "$SS"; chmod 755 "$SS"; }
 sed -i '/roamctl boot/d; /roam-detect-wd/d; /flowcache-doctor-watchdog/d; /fcd-mlo-runner-heal.sh start/d; /flowcache-doctor-mlo-hw-watchdog/d; /dhd-no-coalesce.sh/d' "$SS"
 printf '%s\n' "$DEST/roamctl boot" >> "$SS"
-printf '%s\n' "$DEST/dhd-no-coalesce.sh '&'" >> "$SS"
+printf '%s\n' "$DEST/dhd-no-coalesce.sh &" >> "$SS"
 printf '%s\n' "$DEST/fcd-mlo-runner-heal.sh start" >> "$SS"
 printf '%s\n' 'cru a flowcache-doctor-watchdog "* * * * * /jffs/scripts/roamctl watchdog"' >> "$SS"
 printf '%s\n' 'cru a flowcache-doctor-mlo-hw-watchdog "* * * * * /jffs/scripts/fcd-mlo-runner-heal.sh watchdog"' >> "$SS"
