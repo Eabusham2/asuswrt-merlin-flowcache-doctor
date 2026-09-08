@@ -33,15 +33,8 @@ EOS
 
 cat > "$T/bin/bridge" <<EOS
 #!/bin/sh
-case "\$*" in
-  "fdb show")
-    printf '%s dev wl1.1 master br0\n' "$M1"
-    printf '%s dev wl1.1 master br0\n' "$M2"
-    ;;
-  fdb\ del\ *)
-    printf '%s\n' "\$*" >> "$T/bridge.calls"
-    ;;
-esac
+printf '%s\n' "\$*" >> "$T/bridge.calls"
+exit 99
 EOS
 
 cat > "$T/bin/fcctl" <<EOS
@@ -63,7 +56,6 @@ export FCD_LOG_SYSLOG=0
 export FCD_WIFI_EVENT_LOG="$T/wifi.log"
 export FCD_MLO_KERNEL_EVENTS=0
 export FCD_MLO_HW_HEAL=1
-export FCD_MLO_D3LUT_RELEARN=1
 export FCD_MLO_HW_SETTLE=2
 export FCD_MLO_HW_COOLDOWN=15
 
@@ -74,27 +66,24 @@ printf 'Aug 23 16:00:00 wlceventd: wl1.1: ReAssoc %s Successful\n' "$M1" >> "$T/
 sleep 4
 [ -s "$T/fcctl.calls" ] || { echo 'FAIL reassoc did not auto-heal'; exit 1; }
 grep -qx "flush --hw --mac $M1" "$T/fcctl.calls" || { echo 'FAIL wrong reassoc repair command'; cat "$T/fcctl.calls"; exit 1; }
-grep -qx "fdb del $M1 dev wl1.1 master" "$T/bridge.calls" || { echo 'FAIL reassoc did not purge bridge FDB'; cat "$T/bridge.calls"; exit 1; }
+[ ! -e "$T/bridge.calls" ] || { echo 'FAIL bridge/FDB path must never execute'; cat "$T/bridge.calls"; exit 1; }
 
 a=$(wc -l < "$T/fcctl.calls" | tr -d ' ')
-ba=$(wc -l < "$T/bridge.calls" | tr -d ' ')
 printf 'Aug 23 16:00:10 wlceventd: wl1.1: ReAssoc %s Successful\n' "$UNK" >> "$T/wifi.log"
 sleep 4
 b=$(wc -l < "$T/fcctl.calls" | tr -d ' ')
-bb=$(wc -l < "$T/bridge.calls" | tr -d ' ')
 [ "$a" = "$b" ] || { echo 'FAIL unknown client reached hardware flush'; exit 1; }
-[ "$ba" = "$bb" ] || { echo 'FAIL unknown client reached bridge FDB purge'; exit 1; }
+[ ! -e "$T/bridge.calls" ] || { echo 'FAIL unknown client reached bridge/FDB path'; exit 1; }
 
 printf 'Aug 23 16:00:20 kernel: SBF: dhd2: INIT [%s] ID 65535 BFW 65535 THRSH 2048\n' "$M2" >> "$T/wifi.log"
 sleep 4
 grep -qx "flush --hw --mac $M2" "$T/fcctl.calls" || { echo 'FAIL SBF INIT did not auto-heal'; cat "$T/fcctl.calls"; exit 1; }
-grep -qx "fdb del $M2 dev wl1.1 master" "$T/bridge.calls" || { echo 'FAIL SBF INIT did not purge bridge FDB'; cat "$T/bridge.calls"; exit 1; }
-
 [ "$(wc -l < "$T/fcctl.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL unexpected hardware flush count'; cat "$T/fcctl.calls"; exit 1; }
-[ "$(wc -l < "$T/bridge.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL unexpected bridge purge count'; cat "$T/bridge.calls"; exit 1; }
+[ ! -e "$T/bridge.calls" ] || { echo 'FAIL bridge/FDB path must remain unused'; exit 1; }
+
 status_out=$("$ROOT/scripts/fcd-mlo-runner-heal.sh" status)
 printf '%s\n' "$status_out" | grep -q running
-printf '%s\n' "$status_out" | grep -q 'd3lut-relearn: 1'
+printf '%s\n' "$status_out" | grep -q 'repair: per-client-hw-flush-only'
 "$ROOT/scripts/fcd-mlo-runner-heal.sh" stop
 
-echo 'PASS automatic MLO Runner + D3LUT healing'
+echo 'PASS automatic MLO Runner hardware-only healing'
