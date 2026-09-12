@@ -1,6 +1,6 @@
 #!/bin/sh
 set -u
-VERSION=1.0.7-low-latency
+VERSION=1.0.8-hardened
 REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
@@ -9,7 +9,7 @@ PROFILE=/jffs/configs/profile.add
 TMP=/tmp/flowcache-doctor-install.$$
 BACKUP=$ROOT/backup-$(date '+%Y%m%d-%H%M%S')
 STAGE=0
-FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh roamctl"
+FILES="fcd-lib.sh fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-mlo-map-sync.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh roamctl"
 
 rollback(){
   [ "$STAGE" = "1" ] || return 0
@@ -19,11 +19,14 @@ rollback(){
   cru d flowcache-doctor-watchdog 2>/dev/null
   cru d flowcache-doctor-mlo-hw-watchdog 2>/dev/null
   rm -f "$DEST/fcd-lib.sh" "$DEST/fcd-platform-gtbe19000ai.sh" "$DEST/fcd-daemon.sh" \
-    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-incident.sh" "$DEST/fcd-range-desense.sh" "$DEST/dhd-no-coalesce.sh" "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
+    "$DEST/fcd-events.sh" "$DEST/fcd-mlo-runner-heal.sh" "$DEST/fcd-mlo-map-sync.sh" \
+    "$DEST/fcd-incident.sh" "$DEST/fcd-range-desense.sh" "$DEST/dhd-no-coalesce.sh" \
+    "$DEST/roamctl" "$DEST/flowcache-doctor.conf" \
     "$DEST/flowcache-doctor-uninstall.sh" "$DEST/flowcache-doctor.disabled"
   for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh flowcache-doctor.conf \
-    flowcache-doctor-uninstall.sh; do
+    fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh \
+    fcd-mlo-map-sync.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh \
+    flowcache-doctor.conf flowcache-doctor-uninstall.sh; do
     [ -e "$BACKUP/$f" ] && cp -p "$BACKUP/$f" "$DEST/$f"
   done
   [ -e "$BACKUP/services-start" ] && cp -p "$BACKUP/services-start" "$SS"
@@ -44,8 +47,9 @@ mkdir -p "$TMP" "$DEST" "$ROOT" "$BACKUP" /jffs/configs
 [ -x "$DEST/fcd-mlo-runner-heal.sh" ] && "$DEST/fcd-mlo-runner-heal.sh" stop >/dev/null 2>&1
 [ -x "$DEST/roamctl" ] && "$DEST/roamctl" stop >/dev/null 2>&1
 for f in roam-detect.sh roam-events.sh roam-lib.sh roam-mlo.sh roamctl fcd-lib.sh \
-  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh flowcache-doctor.conf \
-  flowcache-doctor-uninstall.sh; do
+  fcd-platform-gtbe19000ai.sh fcd-daemon.sh fcd-events.sh fcd-mlo-runner-heal.sh \
+  fcd-mlo-map-sync.sh fcd-incident.sh fcd-range-desense.sh dhd-no-coalesce.sh \
+  flowcache-doctor.conf flowcache-doctor-uninstall.sh; do
   [ -e "$DEST/$f" ] && cp -p "$DEST/$f" "$BACKUP/$f"
 done
 [ -e "$SS" ] && cp -p "$SS" "$BACKUP/services-start"
@@ -66,27 +70,28 @@ curl -fsSL "$REPO_RAW/uninstall.sh?cb=$(date +%s)" -o "$TMP/uninstall.sh" || fai
 sh -n "$TMP/uninstall.sh" || fail "syntax check failed: uninstall.sh"
 
 cat > "$TMP/flowcache-doctor.conf" <<'EOFCONF'
-# Legacy/pre-EHT auto-heal remains fail-closed. MLO/EHT uses the separate lifecycle-triggered HW healer below.
+# Legacy/pre-EHT broad auto-heal remains fail-closed. MLO/EHT uses the separate
+# lifecycle-triggered, positively-identified per-client HW invalidation below.
 FCD_INTERVAL=2
 FCD_CONFIRMATIONS=5
 FCD_CONFIRM_MAX_AGE=8
-FCD_AUTOFIX=1
-FCD_EVENT_HEAL=1
+FCD_AUTOFIX=0
+FCD_EVENT_HEAL=0
 FCD_MIN_GAP=8
 FCD_COOLDOWN=60
 FCD_PENDING_TTL=60
 FCD_SETTLE_FLUSHES="20 60 300"
-FCD_LOG_RETENTION_DAYS=14
+FCD_LOG_RETENTION_DAYS=7
 FCD_STEER_MODE=advisor
 FCD_LOG_SYSLOG=0
 FCD_BSSLIST=auto
 
-# Automatic MLO Runner stale-state repair. Triggered only by client lifecycle/reinit events.
-# First force a per-client bridge relearn so patched wlshared globally removes stale DHD D3LUT state,
-# then invalidate only that client's hardware FlowCache entries. The station remains associated.
-# No global FlowCache flush, Runner cycle, Wi-Fi restart, steering, or deauthentication is performed.
+# Automatic MLO Runner stale-state repair. Triggered only by client
+# lifecycle/reinit events after positive MLO/EHT classification.
+# Repair is ONLY: fcctl flush --hw --mac <client>.
+# No synthetic bridge/FDB event, no D3LUT relearn trigger, no global FlowCache
+# flush, no Runner cycle, no Wi-Fi restart, no steering and no deauthentication.
 FCD_MLO_HW_HEAL=1
-FCD_MLO_D3LUT_RELEARN=1
 FCD_MLO_HW_SETTLE=3
 FCD_MLO_HW_COOLDOWN=60
 FCD_MLO_KERNEL_EVENTS=1
@@ -150,16 +155,19 @@ fi
 [ -x "$DEST/fcd-platform-gtbe19000ai.sh" ] || fail "platform parser missing after install"
 [ -x "$DEST/fcd-incident.sh" ] || fail "incident capture missing after install"
 [ -x "$DEST/fcd-range-desense.sh" ] || fail "range desense guard missing after install"
-[ -x "$DEST/dhd-no-coalesce.sh" ] || fail "DHD low-latency coalescing keeper missing after install"
+[ -x "$DEST/dhd-no-coalesce.sh" ] || fail "DHD low-latency keeper missing after install"
+[ -x "$DEST/fcd-mlo-map-sync.sh" ] || fail "MLO map metadata helper missing after install"
 STAGE=2
 rm -rf "$TMP"
 echo "Installed flowcache-doctor $VERSION"
 echo "Backup of the previous version: $BACKUP"
 if [ -f /jffs/wifi_wlc.log ] || which logread >/dev/null 2>&1; then
-  echo "MLO Runner + D3LUT stale-state healer: active"
+  echo "MLO Runner per-client HW stale-state healer: active"
 else
-  echo "MLO Runner + D3LUT stale-state healer: armed; waiting for event source"
+  echo "MLO Runner per-client HW stale-state healer: armed; waiting for event source"
 fi
-echo "DHD interrupt coalescing: disabled (amount=0) with LBR keepers preserved"
+echo "DHD interrupt coalescing: disabled (amount=0); WMM APSD: disabled; LBR keepers preserved"
+echo "Broad legacy/event auto-heal: disabled"
 echo "Automatic utilization incident snapshots: disabled (lightweight UTIL logging remains active)"
+echo "MLO map metadata helper: installed (status/sync only; no forced wireless restart)"
 echo "Run: /jffs/scripts/roamctl clients"
