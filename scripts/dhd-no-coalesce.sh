@@ -3,6 +3,9 @@
 # Low-latency DHD/RDPA keeper for GT-BE19000AI.
 # Broadcom defines int_coalescing_amount=0 as interrupt coalescing disabled.
 # Keep timeout=1 in place; with amount=0 the coalescing path is disabled.
+# WMM APSD is AP-side automatic power-save delivery; disable it for the
+# low-latency profile so frames are not intentionally held for client sleep
+# service periods. WMM itself remains enabled.
 
 sleep 20
 
@@ -12,6 +15,11 @@ for I in 0 1 2; do
         -close \
         -cmd "/Bdmf/Configure dhd_helper/radio_idx=$I int_coalescing_amount=0,int_coalescing_timeout=1" \
         >/dev/null 2>&1
+done
+
+# Low-latency Wi-Fi power-save policy: WMM stays on; AP U-APSD stays off.
+for IF in wl0 wl1 wl2; do
+    wl -i "$IF" wme_apsd 0 >/dev/null 2>&1
 done
 
 # LBR KNOWN-GOOD BEGIN
