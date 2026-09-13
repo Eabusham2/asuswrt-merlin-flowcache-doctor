@@ -8,8 +8,9 @@ mkdir -p "$T/bin" "$T/state" "$T/root"
 
 M1=02:11:22:33:44:55
 M2=02:11:22:33:44:66
+MLD=02:11:22:33:44:00
 UNK=02:aa:bb:cc:dd:ee
-export M1 M2 UNK
+export M1 M2 MLD UNK
 
 cat > "$T/bin/ls" <<'EOS'
 #!/bin/sh
@@ -25,7 +26,8 @@ cat > "$T/bin/wl" <<'EOS'
 case "$*" in
   *" ssid") echo 'Current SSID: "Home"';;
   *" assoclist") printf 'assoclist %s\nassoclist %s\n' "$M1" "$M2";;
-  *" sta_info $M1"|*" sta_info $M2") echo 'flags AUTH ASSOC AUTHORIZED EHT_CAP'; echo 'peer_mld_addr 02:11:22:33:44:00';;
+  *" sta_info $M1"|*" sta_info $M2") echo 'flags AUTH ASSOC AUTHORIZED EHT_CAP MLO_CAP'; echo "MLO: peer mld address : $MLD";;
+  *" sta_info $UNK") :;;
   *" mlo"|*" mlo_status") :;;
   *) :;;
 esac
@@ -65,9 +67,12 @@ sleep 1
 printf 'Aug 23 16:00:00 wlceventd: wl1.1: ReAssoc %s Successful\n' "$M1" >> "$T/wifi.log"
 sleep 4
 [ -s "$T/fcctl.calls" ] || { echo 'FAIL reassoc did not auto-heal'; exit 1; }
-grep -qx "flush --hw --mac $M1" "$T/fcctl.calls" || { echo 'FAIL wrong reassoc repair command'; cat "$T/fcctl.calls"; exit 1; }
+grep -qx "flush --hw --mac $M1" "$T/fcctl.calls" || { echo 'FAIL MLD family missing first link'; cat "$T/fcctl.calls"; exit 1; }
+grep -qx "flush --hw --mac $M2" "$T/fcctl.calls" || { echo 'FAIL MLD family missing sibling link'; cat "$T/fcctl.calls"; exit 1; }
+[ "$(wc -l < "$T/fcctl.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL family repair must flush exactly two affiliated link MACs'; cat "$T/fcctl.calls"; exit 1; }
 [ ! -e "$T/bridge.calls" ] || { echo 'FAIL bridge/FDB path must never execute'; cat "$T/bridge.calls"; exit 1; }
 
+# Unknown client remains fail-closed.
 a=$(wc -l < "$T/fcctl.calls" | tr -d ' ')
 printf 'Aug 23 16:00:10 wlceventd: wl1.1: ReAssoc %s Successful\n' "$UNK" >> "$T/wifi.log"
 sleep 4
@@ -75,15 +80,15 @@ b=$(wc -l < "$T/fcctl.calls" | tr -d ' ')
 [ "$a" = "$b" ] || { echo 'FAIL unknown client reached hardware flush'; exit 1; }
 [ ! -e "$T/bridge.calls" ] || { echo 'FAIL unknown client reached bridge/FDB path'; exit 1; }
 
+# A sibling event within the family cooldown must not duplicate the family flush.
 printf 'Aug 23 16:00:20 kernel: SBF: dhd2: INIT [%s] ID 65535 BFW 65535 THRSH 2048\n' "$M2" >> "$T/wifi.log"
 sleep 4
-grep -qx "flush --hw --mac $M2" "$T/fcctl.calls" || { echo 'FAIL SBF INIT did not auto-heal'; cat "$T/fcctl.calls"; exit 1; }
-[ "$(wc -l < "$T/fcctl.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL unexpected hardware flush count'; cat "$T/fcctl.calls"; exit 1; }
+[ "$(wc -l < "$T/fcctl.calls" | tr -d ' ')" -eq 2 ] || { echo 'FAIL sibling cooldown did not coalesce family repair'; cat "$T/fcctl.calls"; exit 1; }
 [ ! -e "$T/bridge.calls" ] || { echo 'FAIL bridge/FDB path must remain unused'; exit 1; }
 
 status_out=$("$ROOT/scripts/fcd-mlo-runner-heal.sh" status)
 printf '%s\n' "$status_out" | grep -q running
-printf '%s\n' "$status_out" | grep -q 'repair: per-client-hw-flush-only'
+printf '%s\n' "$status_out" | grep -q 'repair: mld-family-hw-flush-only'
 "$ROOT/scripts/fcd-mlo-runner-heal.sh" stop
 
-echo 'PASS automatic MLO Runner hardware-only healing'
+echo 'PASS automatic MLO MLD-family hardware-only healing'
