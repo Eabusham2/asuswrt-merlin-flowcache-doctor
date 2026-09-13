@@ -308,7 +308,7 @@ status(){
 case "${1:-daemon}" in
   daemon) daemon;;
   start) start;;
-  stop) stop; start;;
+  stop) stop;;
   restart) stop; start;;
   watchdog) status >/dev/null 2>&1 || start;;
   status) status;;
