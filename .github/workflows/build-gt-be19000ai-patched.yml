@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   MERLIN_COMMIT: e6ec7e95706d321c50d1b4b2f912b26323f6163e
@@ -124,6 +124,47 @@ jobs:
             echo "FLASH_FILE=$EXPECTED_FIRMWARE"
             echo "FLASH_SHA256=$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
           } > FLASH_MANIFEST.txt
+
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /project/artifacts
+          SHA256="$(cut -d' ' -f1 FIRMWARE_SHA256.txt)"
+          cat > RELEASE_NOTES.md <<EOF
+          # GT-BE19000AI ${EXPECTED_VERSION} patched firmware
+
+          Automatically built from pinned Asuswrt-Merlin upstream commit \`${MERLIN_COMMIT}\`.
+
+          - Model: **GT-BE19000AI**
+          - Firmware: \`${EXPECTED_FIRMWARE}\`
+          - Patch marker: \`${FCD_D3LUT_MARKER}\`
+          - SHA-256: \`${SHA256}\`
+          - Source-built patch path: \`wlshared\`
+          - Prebuilt DHD object: verified present and left unmodified
+          - GitHub Actions run: **${GITHUB_RUN_NUMBER}** / \`${GITHUB_RUN_ID}\`
+
+          The release is created only after the workflow verifies that the patch marker is present in the built wlshared object and that the final firmware image exists and matches its generated SHA-256.
+          EOF
+
+      - name: Publish verified firmware release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: gt-be19000ai-${{ env.EXPECTED_VERSION }}-runner-d3lut-r${{ github.run_number }}
+          name: GT-BE19000AI ${{ env.EXPECTED_VERSION }} Runner D3LUT repair (run ${{ github.run_number }})
+          body_path: /project/artifacts/RELEASE_NOTES.md
+          prerelease: true
+          overwrite_files: true
+          files: |
+            /project/artifacts/${{ env.EXPECTED_FIRMWARE }}
+            /project/artifacts/FIRMWARE_SHA256.txt
+            /project/artifacts/FLASH_MANIFEST.txt
+            /project/artifacts/FLASH_THIS_FILE.txt
+            /project/artifacts/APPLIED_SOURCE_DIFF.patch
+            /project/artifacts/MERLIN_COMMIT.txt
+            /project/artifacts/MERLIN_VERSION.txt
+            /project/artifacts/DHD_PREBUILT_SHA256.txt
+            /project/artifacts/WLSHARED_MARKER_HITS.txt
 
       - name: Preserve build artifacts
         if: always()
