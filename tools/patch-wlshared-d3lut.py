@@ -62,8 +62,12 @@ def patch(path: Path) -> None:
             raise SystemExit(f"post-patch verification failed: {token}")
 
     # The repair must not short-circuit Broadcom's original bridge-event path.
-    repaired_block = check[check.index(MARKER):check.index(MARKER) + 1200]
-    if "return 0;" in repaired_block:
+    # Only inspect the patch body before the preserved bridge-event callback;
+    # the function's normal trailing "return 0;" comes after that callback.
+    marker_pos = check.index(MARKER)
+    req_pos = check.index("dhd_pktc_req_hook(PKTC_TBL_BRIDGE_EVENT", marker_pos)
+    repaired_prefix = check[marker_pos:req_pos]
+    if "return 0;" in repaired_prefix:
         raise SystemExit("post-patch verification failed: early return still suppresses bridge bookkeeping")
 
 
