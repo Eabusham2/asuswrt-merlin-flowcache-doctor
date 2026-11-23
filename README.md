@@ -252,3 +252,10 @@ verifies that the commit belongs to `main`, runs the test suite on that exact
 commit, and publishes a source archive, SHA-256 checksums, and a provenance
 manifest. It never builds or flashes router firmware. See [CHANGELOG.md](CHANGELOG.md)
 for release notes and [LICENSE](LICENSE) for the MIT license.
+
+## Search keywords (ignore)
+
+`asuswrt-merlin`, `asus-gt-be19000ai`, `asus-router`, `broadcom`, `flowcache`, `runner`, `hardware-offload`, `wifi-7`, `multi-link-operation`,
+`mlo`, `eht`, `mld-family`, `jffs`, `router-diagnostics`, `network-troubleshooting`, `wifi-connectivity`, `routed-upload`, `per-client-recovery`,
+`d3lut`, `pktfwd`, `bridge-fdb`, `wlshared`, `firmware-patch`, `custom-firmware`, `busybox`, `posix-shell`, `roamctl`,
+`incident-capture`, `wifi-dropwatch`, `airiq-guard`, `channel-utilization`, `chanim`, `radio-tuning`, `github-actions`, `sha256-checksums`, `pinned-releases`
