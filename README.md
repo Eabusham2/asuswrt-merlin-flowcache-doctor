@@ -1,9 +1,19 @@
-# FlowCache Doctor for Asuswrt-Merlin
+# FlowCache Doctor for Asuswrt-Merlin — GT-BE19000AI
 
 FlowCache Doctor is a collection of router diagnostics and targeted Broadcom
 FlowCache recovery scripts, developed for the **ASUS GT-BE19000AI running
 Asuswrt-Merlin**. It helps investigate cases where a Wi-Fi client remains
 associated but routed traffic becomes slow or unavailable.
+
+[Script releases](https://github.com/Eabusham2/asuswrt-merlin-flowcache-doctor/releases)
+· [Install](#install-the-scripts) · [FAQ](#faq)
+· [Firmware guide](docs/build-patched-firmware-with-github-actions.md)
+· [Report an issue](#report-an-issue)
+
+This is a maintained fork of
+[deviationist/asuswrt-merlin-flowcache-doctor](https://github.com/deviationist/asuswrt-merlin-flowcache-doctor),
+with GT-BE19000AI-focused scripts and firmware work. The [MIT license](LICENSE)
+retains upstream and fork contributor attribution.
 
 The repository contains two separate products:
 
@@ -27,6 +37,39 @@ model-specific parser and low-latency settings. Read the changes below before
 installing: this package includes active recovery and radio tuning, as well as
 passive diagnostics. It does not establish that a forwarding problem has the
 same cause on every router, and it is not a general RF-range or ISP-loss fix.
+
+## FAQ
+
+### Can this help with “Wi-Fi connected, no internet”?
+
+It helps investigate forwarding failures while a client remains associated.
+Compare gateway, public-IP, and DNS reachability to distinguish that condition
+from a DNS or upstream problem. Start with the [diagnostic captures](#diagnostics-and-optional-components).
+
+### Why is local Wi-Fi fast but internet upload slow?
+
+Local and routed traffic can exercise different forwarding paths. That symptom
+motivated the [original GT-BE19000AI investigation](docs/GT_BE19000AI_ROOT_CAUSE_RESEARCH_2026-08-25.md).
+A matching symptom is a reason to collect evidence, not proof of the same cause.
+
+### Do I need custom firmware?
+
+The JFFS scripts work independently. The [experimental firmware](#custom-firmware)
+adds a separate D3LUT hook for natural bridge-FDB events; installing the scripts
+does not flash it.
+
+### Does this support other ASUS routers or stock ASUSWRT?
+
+The current parser, radio mapping, and tuning target GT-BE19000AI on
+Asuswrt-Merlin. Another model or firmware needs a compatibility review; see
+[requirements and scope](#requirements-and-scope).
+
+### Will the healer restart Wi-Fi or turn off acceleration?
+
+The MLO healer performs targeted hardware-flow invalidation without restarting
+Wi-Fi or cycling Runner. The core installation also applies a separate radio
+tuning profile. Review [the installed behavior](#what-the-core-installation-changes)
+before choosing it for your network.
 
 ## Install the scripts
 
@@ -163,8 +206,36 @@ See the [patch design](docs/gt-be19000ai-pktfwd-source-patch.md) and
 [August 2026 investigation](docs/GT_BE19000AI_ROOT_CAUSE_RESEARCH_2026-08-25.md)
 is historical research, not a statement of current installation behavior.
 
+## Report an issue
+
+[Open an issue](https://github.com/Eabusham2/asuswrt-merlin-flowcache-doctor/issues)
+with enough information to distinguish a client, forwarding, radio, or upstream failure:
+
+- Router model and complete firmware version.
+- Script release tag or source commit, plus installed optional components.
+- Whether the affected client is wired or wireless, and whether other clients are affected.
+- Gateway, public-IP, and DNS reachability during the failure.
+- Reproduction steps and a reviewed capture from [the diagnostic tools](#diagnostics-and-optional-components), when available.
+
+## Related projects
+
+These independent projects address other parts of a home network. Follow each
+project's compatibility requirements and release status before combining tools.
+
+- [Asuswrt DynBQ v3](https://github.com/Eabusham2/asuswrt-dynbq-v3): experimental
+  Broadcom queue control requiring a kernel module matched to the exact firmware
+  ABI. Its historical firmware baseline differs from this project's current build.
+- [AdGuard Home Block Page](https://github.com/Eabusham2/adguard-home-blockpage): a
+  Docker-hosted HTTP explanation page for an existing AdGuard Home installation,
+  with its own API, host, and HTTPS limitations.
+- [Router VPN](https://github.com/Eabusham2/router-vpn): self-hosted VPN/proxy
+  services for an ARM64 Docker host, native clients, and optional Merlin forwarding.
+  Check its [platform status](https://github.com/Eabusham2/router-vpn/blob/main/docs/CURRENT-STATUS.md)
+  and same-commit release requirements.
+
 ## Development and releases
 
+Contributor and coding-assistant guidance is in [AGENTS.md](AGENTS.md).
 On Linux with Python 3 and BusyBox installed, run:
 
 ```sh
