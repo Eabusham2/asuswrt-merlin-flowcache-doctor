@@ -1,106 +1,105 @@
-# Build the GT-BE19000AI D3LUT-repair firmware with GitHub Actions
+# Build the GT-BE19000AI D3LUT-repair firmware
 
-You do not need Linux on your Mac. Use the manual workflow:
+The custom firmware build runs in GitHub Actions. It is separate from the JFFS
+script releases and applies only to the **ASUS GT-BE19000AI**.
 
-`.github/workflows/build-gt-be19000ai-patched.yml`
+## Build inputs
 
-## What is fixed
+The workflow `.github/workflows/build-gt-be19000ai-patched.yml` is pinned to:
 
-The strongest reproduced failure is a routed-upload collapse with healthy local Wi-Fi/RF where toggling Runner hardware acceleration off and back on immediately restores WAN upload. The source evidence points to stale DHD PKTFWD/D3LUT state after MLO association/reassociation churn, followed by stale FlowCache/Runner hardware programming.
+| Input | Value |
+| --- | --- |
+| Merlin version | `3006.102.9_0` |
+| Upstream commit | `9b25e55ca5c56a6f01d6a56264c0f6c47459ada0` |
+| Build target | `make gt-be19000ai` |
+| Target directory | `release/src-rt-5.04behnd.4916/targets/96813GW/` |
+| Firmware file | `GT-BE19000AI_3006_102.9_0_emmc_squashfs.pkgtb` |
+| Compiled repair marker | `FCD_DHD_D3LUT_REPAIR_V1` |
 
-The intended DHD behavior would globally invalidate the station MAC on association and reassociation lifecycle events. GT-BE19000AI, however, links a model-specific **prebuilt DHD object**, so editing `dhd_pktfwd.c` alone does not reach the shipped module.
+It does **not** discover the latest Merlin release. Updating the upstream base
+requires reviewing and changing the pinned version, commit, expected image,
+and compatibility checks together. The toolchain container currently uses its
+upstream `latest` tag; the source pin and output hashes identify the source and
+result, but do not make the entire build environment immutable.
 
-The current fix therefore patches the source-built Broadcom `wlshared` layer. On DHD bridge FDB add/delete events, patched `wlshared_linux.c` calls:
+## Repair design
+
+The GT-BE19000AI build links a proprietary prebuilt DHD object. Editing the
+open `dhd_pktfwd.c` reference source alone does not change that object.
+
+The current patch instead changes source-built `wlshared_linux.c`. For DHD
+bridge FDB add/delete events it calls:
 
 ```c
 dhd_pktc_del_hook((unsigned long)(fdb_info->addr), NULL);
 ```
 
-The prebuilt DHD registers that hook to `dhd_pktfwd_lut_del()`. Passing `NULL` intentionally makes PKTFWD search the **global D3LUT pool**, avoiding a stale/wrong radio or unit mapping.
+The hook requests D3LUT lookup/invalidation across pools for that station MAC.
+The DHD prebuilt remains unmodified. See the [patch design](gt-be19000ai-pktfwd-source-patch.md)
+for the source path and scope.
 
-This is paired with the JFFS MLO healer. After a positively identified MLO/EHT lifecycle event it deletes only that client's bridge FDB entry, allowing patched firmware to globally purge the D3LUT mapping, then runs the existing per-client hardware FlowCache invalidation:
+The separate current JFFS healer performs MLD-family hardware FlowCache
+invalidation after supported MLO/EHT events. It does not force a bridge FDB
+delete. Firmware-side D3LUT invalidation applies to natural FDB lifecycle events.
 
-```text
-bridge FDB delete for one MAC
-        -> patched wlshared
-        -> dhd_pktc_del_hook(MAC, NULL)
-        -> global DHD D3LUT purge
-        -> normal bridge/D3LUT relearn on next frame
-        -> fcctl flush --hw --mac MAC
-```
+## Start a build
 
-It does not globally flush FlowCache, cycle Runner, restart Wi-Fi, or deauthenticate the client.
+1. Open the repository's **Actions** tab.
+2. Choose **BUILD THIS - GT-BE19000AI firmware (Runner fix)**.
+3. Select **Run workflow** on the reviewed `main` revision.
+4. After success, open the firmware prerelease linked by the publishing step,
+   or download the artifact `GT-BE19000AI-3006.102.9_0-Runner-D3LUT-repair`.
+5. Record the run URL and check its commit before using the output.
 
-## Why the old DHD-source/binary-patcher artifacts are obsolete
+Changes to the workflow or patch tool also trigger a new build on `main`.
+Start a fresh run after changing the workflow; retrying an old run uses its old
+workflow revision.
 
-GT-BE19000AI's DHD Makefile uses `prebuilt/dhd.o`. Earlier builds that only edited `shared/impl1/dhd_pktfwd.c` did not put that edit into `dhd.ko`.
+## Verify the output
 
-A later experimental binary-patcher path was also removed. The current build does **not** rewrite the proprietary DHD object. It changes the open/source-built `wlshared_linux.c`, which already exports the supported `dhd_pktc_del_hook` used by Broadcom's own code.
+A successful build checks the pinned source and model prerequisites, runs the
+Broadcom build as the non-root `docker` user, looks for the repair marker in a
+built `wlshared.o` or `wlshared.ko`, and checks the normal firmware image and its
+SHA-256.
 
-Do not flash an older artifact just because it was once labeled `pktfwd-patched` or `VERIFIED_FOR_FLASH`. Start a fresh run from current `main`.
-
-## Release selection
-
-The workflow has no manual version box. Each new run resolves the newest stable GT-BE19000AI-compatible release on Merlin's `asuswrt6` lineage and pins that immutable commit for the build. Alpha, beta, RC, and development versions are rejected.
-
-For the currently established base, Merlin `3006.102.8_4` corresponds to upstream commit:
-
-`e6ec7e95706d321c50d1b4b2f912b26323f6163e`
-
-A later stable release is accepted only if the model target, source-built `wlshared` repair point, GT-BE19000AI prebuilt DHD path, and required model prebuilts are present.
-
-## Run it
-
-1. Open this repository on GitHub.
-2. Open **Actions**.
-3. Select **Build patched GT-BE19000AI firmware**.
-4. Click **Run workflow** and start a brand-new run from `main`.
-5. When it completes successfully, open the run's **Artifacts** section.
-6. Download `GT-BE19000AI-<resolved version>-d3lut-repair-<run number>` and unzip it.
-
-Do not use **Re-run jobs** from an older run after workflow code changed.
-
-## Required artifact proof
-
-Before flashing, `FLASH_MANIFEST.txt` must contain at least:
+The release includes the firmware, checksums, source diff, source/version
+identity, DHD prebuilt hash, and compiled-marker evidence. Check that
+`FLASH_MANIFEST.txt` contains:
 
 ```text
 VERIFIED_FOR_FLASH=YES
+MODEL=GT-BE19000AI
+VERSION=3006.102.9_0
 FIX=FCD_DHD_D3LUT_REPAIR_V1
 PATCH_PATH=source-built-wlshared
 DHD_PATH=prebuilt-unmodified
+FLASH_FILE=GT-BE19000AI_3006_102.9_0_emmc_squashfs.pkgtb
 ```
 
-The workflow also requires:
-
-- Merlin `make` exit code `0`;
-- the exact normal GT-BE19000AI PKGTB to exist;
-- a successful firmware SHA-256 round trip;
-- the expected stable release/version/commit;
-- the `wlshared_linux.c` source diff containing the global D3LUT hook call;
-- built `wlshared.o`/`wlshared.ko` output;
-- the marker `FCD_DHD_D3LUT_REPAIR_V1` inside the compiled wlshared binary.
-
-This last check is important: it proves the edited source reached a built binary instead of repeating the old source-only DHD mistake.
-
-## File to flash
-
-The GitHub ZIP is not router firmware. Unzip it and upload only the normal file ending in:
-
-`_emmc_squashfs.pkgtb`
-
-Do not use `_loader.pkgtb` for a normal firmware upgrade and do not rename the file to another extension.
-
-Before flashing, back up router configuration and JFFS. Then use **Administration > Firmware Upgrade** and let the router reboot normally.
-
-## After flashing
-
-Install/update the current JFFS component so the per-client forced FDB relearn is active:
+From the directory containing the image and checksum file, run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main/install.sh | sh
+sha256sum -c FIRMWARE_SHA256.txt
 ```
 
-Then validate the original failure first: strong-RF close-range routed upload, normal MLO reassociation/lifecycle activity, and no unexplained 2-8 Mbps WAN-upload state. The fix is targeted at stale D3LUT/Runner state; it is not claimed to solve independent far-range RF/antenna problems or ISP/BGW packet loss.
+On macOS, use `shasum -a 256 -c FIRMWARE_SHA256.txt`.
 
-For permanent build rules, see `docs/FIRMWARE_UPDATE_POLICY.md`.
+The manifest records the workflow's build checks. It is not evidence that the
+firmware was flashed or that a particular router's symptoms were resolved.
+The workflow uploads its artifact directory after failure when possible, so
+an artifact's presence alone does not establish a valid firmware build.
+
+## Flash and validate
+
+Back up the router configuration and JFFS. Use the ASUS/Merlin firmware upgrade
+page and the normal `*_emmc_squashfs.pkgtb` image for the exact model. The GitHub
+artifact ZIP and script release archive are not firmware. Do not use a
+`_loader.pkgtb` file for a normal upgrade or force an image rejected by the router.
+
+After the normal reboot, reproduce the original failure conditions and compare
+local LAN traffic with routed WAN traffic. Keep the build identity with the
+results. A successful compile or a checksum does not establish that unrelated
+RF-range, antenna, DNS, or ISP-path problems have been fixed.
+
+For script installation and current runtime behavior, use the [main README](../README.md).
+For maintenance rules, see the [firmware policy](FIRMWARE_UPDATE_POLICY.md).

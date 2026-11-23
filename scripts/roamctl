@@ -1,5 +1,5 @@
 #!/bin/sh
-VERSION=1.0.3-mlo-safe-auto
+VERSION=1.0.9
 LIB=/jffs/scripts/fcd-lib.sh
 DAEMON=/jffs/scripts/fcd-daemon.sh
 EVENTS=/jffs/scripts/fcd-events.sh
@@ -7,7 +7,7 @@ INCIDENT=/jffs/scripts/fcd-incident.sh
 CONF=/jffs/scripts/flowcache-doctor.conf
 STATE=/tmp/flowcache-doctor
 ROOT=/jffs/flowcache-doctor
-REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
+REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/${FCD_REF:-main}
 [ -r "$LIB" ] && . "$LIB"
 
 pid_alive(){ [ -n "$1" ] && [ -d "/proc/$1" ]; }

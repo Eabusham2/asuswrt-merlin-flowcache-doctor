@@ -1,0 +1,118 @@
+name: Release scripts
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: New script release tag, matching install.sh (for example v1.0.9)
+        required: true
+        type: string
+      sha:
+        description: Full 40-character commit SHA on main to test and release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-scripts-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
+    steps:
+      - name: Validate input format
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact source and version
+        id: source
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test "$(sed -n 's/^VERSION=//p' install.sh)" = "${RELEASE_TAG#v}"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          fi
+          printf 'sha=%s\ntag=%s\n' "$RELEASE_SHA" "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: validate
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ needs.validate.outputs.sha }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [validate, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          persist-credentials: false
+      - name: Package verified source
+        env:
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 tools/package-release.py --tag "$RELEASE_TAG" --commit "$RELEASE_SHA" --output dist
+          cd dist
+          sha256sum -c SHA256SUMS
+      - name: Preserve release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowcache-doctor-${{ needs.validate.outputs.tag }}
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish new script release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "A release already exists for $RELEASE_TAG; existing assets will not be overwritten." >&2
+            exit 1
+          fi
+          cat > release-notes.md <<NOTES
+          ## FlowCache Doctor scripts ${RELEASE_TAG}
+
+          Public setup documentation, pinned installer downloads, and verified script packaging.
+
+          - Source commit: ${RELEASE_SHA}
+          - Validation: complete shell, safety, MLO, incident, daemon, and isolated installer suite.
+          - Included: source archive, SHA-256 checksums, and release manifest.
+          - Installation: follow README.md and set FCD_REF=${RELEASE_TAG} when running an installer or update.
+          - Compatibility: GT-BE19000AI / Asuswrt-Merlin; CI simulations do not establish physical-router validation.
+          - This is a scripts release. Custom firmware remains a separate prerelease product.
+
+          See CHANGELOG.md at this source commit for details.
+          NOTES
+          gh release create "$RELEASE_TAG" dist/* --target "$RELEASE_SHA" \
+            --title "FlowCache Doctor ${RELEASE_TAG}" --notes-file release-notes.md

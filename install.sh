@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
-VERSION=1.0.8-hardened
-REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
+VERSION=1.0.9
+REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/${FCD_REF:-main}
 DEST=/jffs/scripts
 ROOT=/jffs/flowcache-doctor
 SS=$DEST/services-start

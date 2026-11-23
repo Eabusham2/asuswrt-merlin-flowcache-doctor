@@ -44,20 +44,19 @@ A learned station moving or being recreated can generate bridge FDB lifecycle no
 
 The source-built bridge layer is therefore a useful choke point even though the proprietary DHD event handler itself is prebuilt.
 
-## Runtime pairing for same-port reassociation
+## Current runtime pairing
 
-A reassociation does not always produce a natural bridge source move. The JFFS MLO healer therefore forces a narrow per-client relearn after a positively identified MLO/EHT lifecycle event:
+The JFFS MLO healer waits for a supported lifecycle/reinitialization event to
+settle, verifies MLO/EHT identity, and invalidates hardware FlowCache entries for
+the positively identified MLD family. If a live peer-MLD relationship was already
+observed, affiliated link MACs can be recovered from its runtime family cache.
+A positively identified single-link EHT client can use only its event MAC.
 
-1. wait for the event burst to settle;
-2. verify the client is MLO/EHT-positive;
-3. delete only that client's dynamic bridge FDB entry;
-4. patched `wlshared` receives the delete and calls the global DHD D3LUT delete hook;
-5. the next client frame relearns bridge/D3LUT state;
-6. `fcctl flush --hw --mac <client>` invalidates that client's stale hardware FlowCache programming.
-
-The healer does **not** globally flush FlowCache, toggle Runner, restart Wi-Fi, steer, or deauthenticate the station.
-
-If the `bridge` userspace command is unavailable, the script fails gracefully and still performs the existing per-MAC FlowCache hardware flush. Natural FDB lifecycle notifications remain covered by the firmware patch.
+The current runtime never synthesizes bridge FDB deletion. The earlier forced
+FDB-relearn design is superseded. Firmware-side D3LUT invalidation still applies
+to natural bridge FDB lifecycle notifications; the runtime performs the separate
+hardware FlowCache repair. It does not globally flush FlowCache, toggle Runner,
+restart Wi-Fi, steer, or deauthenticate the station.
 
 ## Firmware build proof
 

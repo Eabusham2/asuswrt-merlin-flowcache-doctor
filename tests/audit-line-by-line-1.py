@@ -9,6 +9,8 @@ for path in prod:
     text=path.read_text()
     for n,line in enumerate(text.splitlines(),1):
         s=line.strip()
+        if s.startswith('#'):
+            continue
         if re.search(r'\bfcctl\s+flush\s+--mac', s):
             fc.append((path.relative_to(root).as_posix(),n,s))
         if re.search(r'(^|\s)eval(\s|$)', line): errors.append((path,n,'eval is forbidden'))

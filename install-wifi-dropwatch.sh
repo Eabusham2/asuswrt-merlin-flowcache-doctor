@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
+REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/${FCD_REF:-main}
 DEST=/jffs/scripts
 WATCH=$DEST/fcd-wifi-dropwatch.sh
 HEALTH=$DEST/fcd-suite-health.sh

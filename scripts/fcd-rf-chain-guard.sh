@@ -35,8 +35,7 @@ read_mask() {
     _if=$1
     _cmd=$2
     _out=$(wl -i "$_if" "$_cmd" 2>/dev/null | tail -n 1 | tr -d '\r')
-    set -- $_out
-    eval _v=\${$#:-}
+    _v=$(printf '%s\n' "$_out" | awk '{print $NF}')
     normalize_mask "${_v:-unknown}"
 }
 

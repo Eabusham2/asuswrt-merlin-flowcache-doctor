@@ -1,57 +1,61 @@
-# GT-BE19000AI firmware update policy
+# GT-BE19000AI firmware maintenance policy
 
-This is the project rule for future compiled firmware changes.
+This document describes the maintained firmware path. JFFS script releases use
+a separate workflow and do not trigger a firmware build.
 
-## Permanent workflow
+## Source and compatibility
 
-1. Build firmware in GitHub Actions, not on the router or ASUS AI Board.
-2. Keep JFFS add-ons and compiled firmware changes distinct. A source edit only counts if it reaches a binary that the GT-BE19000AI image actually packages.
-3. Use Merlin's GT-BE19000AI `asuswrt6` lineage and the real target `make gt-be19000ai` from `release/src-rt-5.04behnd.4916`.
-4. Resolve the newest stable compatible release automatically, reject alpha/beta/RC/development versions, and pin the selected immutable upstream commit for the entire run.
-5. Record version, lineage, upstream commit, expected firmware filename, build exit code, source diff, and firmware SHA-256 in the artifact.
-6. Run only the Broadcom/Merlin `make` command as non-root `docker`; retain root for GitHub Actions/container plumbing.
-7. Do not destructively replace the toolchain directory; use the known working `/opt/toolchains` mapping.
-8. GT-BE19000AI DHD is prebuilt. Never treat an edit to `shared/impl1/dhd_pktfwd.c` as proof that `dhd.ko` changed.
-9. Do not rewrite the proprietary DHD prebuilt merely to force the open-source reference change into it when a supported source-built integration point exists.
-10. For the current stale PKTFWD/D3LUT problem, the effective repair point is source-built `shared/impl1/wlshared_linux.c`. It owns the exported `dhd_pktc_del_hook`, while the prebuilt DHD provides the actual D3LUT delete implementation.
-11. The D3LUT repair uses `dhd_pktc_del_hook(mac, NULL)` for DHD bridge FDB add/delete events. `NULL` deliberately invokes the prebuilt DHD's global-pool lookup, avoiding stale device/radio pool selection.
-12. Preserve the real `make` result in `MAKE_EXIT_CODE.txt`, but allow salvage steps to run before the final green/red decision.
-13. Always salvage the build log, log tail, target-directory listing, PKGTB outputs, firmware SHA-256, source diff, and compiled wlshared evidence.
-14. The normal image is under `targets/96813GW/` and ends in `_emmc_squashfs.pkgtb`. `_loader.pkgtb` is not the normal firmware-upgrade image.
-15. A firmware patch must contain a deterministic marker or equivalent proof in the compiled binary that should carry the change. For D3LUT repair v1 the marker is `FCD_DHD_D3LUT_REPAIR_V1` in source-built `wlshared.o`/`wlshared.ko`.
-16. The final gate requires `MAKE_EXIT_CODE=0`, exact firmware presence, SHA-256 round-trip, resolved release identity, expected source diff, built wlshared output, and compiled repair marker.
-17. Emit `FLASH_MANIFEST.txt` only after those gates pass. For the current repair it must include:
+1. Build in GitHub Actions using the GT-BE19000AI target from Merlin's
+   `release/src-rt-5.04behnd.4916` tree.
+2. Keep the upstream commit, expected version, expected firmware filename, and
+   model prerequisites together in the workflow. The current base is
+   `3006.102.9_0` at `9b25e55ca5c56a6f01d6a56264c0f6c47459ada0`.
+3. The present workflow uses this fixed pin. Earlier documentation described an
+   automatic stable-release selector; that is not the implemented path.
+4. When changing the base, verify the GT-BE19000AI chip profile, prebuilt DHD
+   location, source-built `wlshared` integration, and expected normal image.
+   Similar version labels on another Merlin lineage are insufficient.
+5. Keep JFFS changes and firmware changes distinct. The current JFFS healer uses
+   MLD-family hardware FlowCache invalidation and does not delete bridge FDB entries.
 
-```text
-VERIFIED_FOR_FLASH=YES
-FIX=FCD_DHD_D3LUT_REPAIR_V1
-PATCH_PATH=source-built-wlshared
-DHD_PATH=prebuilt-unmodified
-```
+## Patch and build
 
-18. A failed run should still upload diagnostics whenever Actions itself is functioning.
-19. Start a brand-new workflow run after workflow/patch code changes; do not re-run an old run whose workflow revision is stale.
-20. Before flashing, back up router configuration and JFFS. Flash only the normal `.pkgtb` through the ASUS/Merlin firmware page and do not force a rejected image.
-21. After flashing, validate the original reproduced failure before changing unrelated settings. Keep Runner/WFD/FlowCache enabled unless a temporary diagnostic toggle is specifically required.
-22. Do not add speculative validation gates. A gate must establish model identity, effective patch inclusion, build integrity, or artifact integrity.
+- Preserve the proprietary DHD prebuilt. GT-BE19000AI does not compile the open
+  `dhd_pktfwd.c` reference source into that object.
+- Apply the supported repair through source-built `wlshared_linux.c` and the
+  exported DHD delete hook. `dhd_pktc_del_hook(mac, NULL)` requests global-pool
+  handling for one station MAC on DHD bridge FDB events.
+- Run the actual Broadcom compile as non-root `docker`; retain the known
+  toolchain mapping. The workflow currently uses an upstream toolchain image
+  tagged `latest`, so output checksums and source identity must be retained.
+- Preserve the compile's failure status with shell `pipefail` when logging.
+- After build success, require a compiled `wlshared` repair-marker hit, the exact
+  normal firmware output, and a successful SHA-256 check before publishing.
+- Emit `FLASH_MANIFEST.txt` only after those checks. Retain the source diff,
+  upstream identity, prebuilt-DHD checksum, firmware checksum, and marker evidence.
+- Upload available diagnostic artifacts even after a failed run. A failed run's
+  artifact directory must not be treated as a verified firmware release.
 
-## Automatic release selection
+## Publication and device validation
 
-The workflow has no manual version input. A fresh run walks stable release-version commits on `asuswrt6`, newest first, and requires the GT-BE19000AI target plus the exact build-path prerequisites used by the repair.
+Firmware releases remain prereleases, separately named
+`gt-be19000ai-<version>-runner-d3lut-r<run>`. Preserve the original build evidence;
+never substitute a scripts archive or an older source-only patch artifact.
 
-The established `3006.102.8_4` base is upstream commit:
+Use a fresh workflow run after workflow/patch changes. Before flashing, back up
+configuration and JFFS and use only the exact model's normal
+`*_emmc_squashfs.pkgtb` image through the firmware upgrade page. Do not force a
+rejected image.
 
-`e6ec7e95706d321c50d1b4b2f912b26323f6163e`
+Build checks establish source/build/output evidence. Actual flashing, booting,
+and reproduction of the routed-upload failure remain separate device checks.
+The repair targets stale forwarding state; it does not establish a cure for
+independent RF weakness, wiring, DNS, or ISP path loss.
 
-At the time that base was established, the development branch had already moved beyond it; the stable selector intentionally rejects that development head. Future stable versions may be selected automatically only when their tree still exposes the required model/build integration points.
+## Historical lessons retained
 
-## Lessons that must not regress
-
-- A generic or wrong Merlin lineage can contain a similar version string while lacking the GT-BE19000AI target. Model compatibility is a tree/build property, not just a version label.
-- Broadcom's build rejects running the actual compile as root; Actions still needs root-capable plumbing around it.
-- Successful firmware output can exist even when a later artifact-search step is wrong. Judge the compile by its exit code and causal error, then fix packaging separately.
-- Run #7 proved that a green build plus a visible source diff is insufficient: GT-BE19000AI linked a prebuilt DHD while `dhd_pktfwd.c` was never compiled.
-- The later DHD binary-patcher experiment was removed from the production path. The current design reaches the required semantics through source-built `wlshared` and the DHD-exported delete hook instead of modifying the opaque DHD object.
-- `dhd_pktfwd_lut_del(mac, NULL)` is not an invented behavior: the Broadcom implementation explicitly treats `net_device == NULL` as a global-pool lookup, and stock integration code already uses the delete hook with `NULL` in another path.
-- Bridge FDB lifecycle events are an appropriate repair trigger because `wlshared` already consumes switchdev FDB notifications. The JFFS healer can additionally force a single-client FDB relearn after an MLO lifecycle event when no natural source move occurs.
-- The repair must remain narrow: one client MAC, global D3LUT invalidation for that MAC, then one-client hardware FlowCache invalidation. No automatic global FlowCache flush, Runner cycle, Wi-Fi restart, or deauthentication.
+A visible DHD source diff once failed to reach the packaged model-specific DHD
+prebuilt. A later binary-patcher experiment was removed. The maintained path
+therefore uses source-built `wlshared` and requires a marker in a compiled output.
+The human-readable patch and the Python patch tool are both retained: the tool
+applies the build change, while the patch provides a reviewable source reference.

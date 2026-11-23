@@ -10,7 +10,7 @@ grep -q 'process_settle' scripts/fcd-daemon.sh
 grep -q 'fcd_num "\$_due"' scripts/fcd-daemon.sh
 # Event listener only appends queue entries.
 grep -q 'FCD_EVENT_QUEUE' scripts/fcd-events.sh
-# Retention is exactly configurable and defaults to 30 days.
+# Library fallback remains 30 days; the installed hardened profile selects 7.
 grep -q 'FCD_LOG_RETENTION_DAYS=${FCD_LOG_RETENTION_DAYS:-30}' scripts/fcd-lib.sh
-grep -q 'FCD_LOG_RETENTION_DAYS=30' install.sh
+grep -q 'FCD_LOG_RETENTION_DAYS=7' install.sh
 echo 'PASS runtime structure'

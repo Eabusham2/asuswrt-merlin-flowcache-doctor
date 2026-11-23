@@ -52,8 +52,8 @@ need('incident retention is implemented','fcd_cleanup_incidents' in platform and
 
 # Defaults and lifecycle.
 need('automatic five-pass confirmation','FCD_CONFIRMATIONS=5' in install)
-need('thirty-day retention','FCD_LOG_RETENTION_DAYS=30' in install and 'mtime +"$FCD_LOG_RETENTION_DAYS"' in lib)
-need('incident capture default on','FCD_INCIDENT_CAPTURE=1' in install)
+need('seven-day installed retention','FCD_LOG_RETENTION_DAYS=7' in install and 'mtime +"$FCD_LOG_RETENTION_DAYS"' in lib)
+need('automatic full incident capture defaults off','FCD_INCIDENT_CAPTURE=0' in install)
 need('no force steering default','FCD_STEER_MODE=advisor' in install and 'never force-steers' in ctl)
 need('syslog disabled by default','FCD_LOG_SYSLOG=0' in install)
 need('installer syntax checks downloads','sh -n "$TMP/$f"' in install and 'sh -n "$TMP/uninstall.sh"' in install)

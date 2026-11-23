@@ -1,12 +1,17 @@
-# GT-BE19000AI root-cause research and remaining issue plan
+# Historical GT-BE19000AI investigation — August 2026
+
+This is a dated case study from one test installation, retained as research
+evidence. Its runtime design, versions, measurements, and build status describe
+that investigation, not current installation defaults. See the [main README](../README.md)
+and [current patch design](gt-be19000ai-pktfwd-source-patch.md) for maintained behavior.
+The forced bridge-FDB relearn described below has since been removed; the current
+JFFS healer uses MLD-family hardware-only FlowCache invalidation.
 
 Updated: 2026-08-25 CDT
 
 Router: ASUS GT-BE19000AI
-Current base: Asuswrt-Merlin 3006.102.8_4
-LAN: 192.168.50.1/24
-WAN: eth0
-ISP: AT&T Fiber / BGW320 passthrough
+Test firmware: Asuswrt-Merlin 3006.102.8_4
+Test connection: AT&T Fiber through BGW320 IP passthrough
 
 ## Priority order
 
@@ -171,6 +176,6 @@ Handle last. Historical throughput is poor, and channel 6 has appeared cleaner t
 - Do not reboot/reconnect before capturing a recurrence if connectivity remains usable enough to collect evidence.
 - Preserve AdGuard unless DNS-specific evidence points at it.
 
-## Current build status
+## Build status recorded in August 2026
 
-The production repo now uses the source-built `wlshared` D3LUT repair plus the per-client MLO runtime relearn. Push shell tests passed on the code change before the documentation-only commits. A fresh manual firmware workflow run from current `main` is the required next build; old source-only or binary-patcher artifacts are obsolete for this repair.
+At this historical checkpoint, the production repo used the source-built `wlshared` D3LUT repair plus the per-client MLO runtime relearn. Push shell tests passed on the code change before the documentation-only commits. A fresh manual firmware workflow run from current `main` is the required next build; old source-only or binary-patcher artifacts are obsolete for this repair.

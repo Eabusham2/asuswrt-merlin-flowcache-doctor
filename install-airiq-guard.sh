@@ -1,7 +1,7 @@
 #!/bin/sh
 set -u
 
-REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/main
+REPO_RAW=https://raw.githubusercontent.com/Eabusham2/asuswrt-merlin-flowcache-doctor/${FCD_REF:-main}
 DEST=/jffs/scripts
 GUARD=$DEST/fcd-airiq-guard.sh
 UTIL=$DEST/fcd-util-detail.sh
